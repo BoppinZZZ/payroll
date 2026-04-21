@@ -568,7 +568,7 @@
       </div>
     </div>
     <div class="login-title">Sign in to your account</div>
-    <form class="login-form" onsubmit="return false">
+    <form class="login-form" onsubmit="sendMagicLink(); return false;">
       <label class="login-label" for="loginEmail">Email address</label>
       <input id="loginEmail" class="login-input" type="email" placeholder="you@example.com" autocomplete="email" required>
       <button id="loginSendBtn" class="login-btn" type="submit">Send me a magic link</button>
@@ -580,7 +580,7 @@
   </div>
 </div>
 
-<div class="app">
+<div class="app" style="display:none">
 
   <!-- ============================================================
        SIDEBAR NAVIGATION
@@ -609,6 +609,15 @@
       <div>Current pay period</div>
       <strong style="color:#e2e8f0;" id="current-period-label">PP9 · Apr 18 – May 1, 2026</strong>
       <button class="footer-btn" onclick="handleResetData()" title="Reload the original imported Excel data, discarding any changes">Reset to imported data</button>
+
+      <!-- PHASE 2 CHUNK 4d — Auth account section -->
+      <!-- Shown only when the user has an active Supabase session. Hidden by -->
+      <!-- default so file:// bypass users (no session) don't see it.         -->
+      <div id="authAccount" style="display:none; margin-top: 16px; padding-top: 16px; border-top: 1px solid #334155;">
+        <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">Signed in as</div>
+        <div id="authEmail" style="color: #e2e8f0; font-size: 13px; word-break: break-all; margin-bottom: 8px;">—</div>
+        <button class="footer-btn" onclick="signOut()" title="Sign out and return to the login screen">Sign out</button>
+      </div>
     </div>
   </aside>
 
@@ -708,6 +717,24 @@
 </div>
 
 <script>
+// ============================================================================
+// 0. SUPABASE CONFIG — cloud database + auth connection
+// ============================================================================
+//
+// URL and anon/public key for this app's Supabase project.
+// These values are safe to expose in client-side code:
+//   - The anon key is the PUBLIC key, designed for client use
+//   - Actual data access is protected by Row Level Security (RLS) policies
+//     (see supabase-schema-01-tables.sql)
+//   - The service_role key is NOT here — that one bypasses RLS and must
+//     never appear in client-side code
+//
+// Added: 2026-04-20 (Phase 2 Chunk 4a — auth integration)
+//
+const SUPABASE_URL = "https://abjxgrstteqjitfzbant.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFianhncnN0dGVxaml0ZnpiYW50Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MTk2NzMsImV4cCI6MjA5MjI5NTY3M30.XRTJ7qTXRuwSr4UjtIJBVOSV7YIdywk6t7emcVnT3pE";
+
+
 // ============================================================================
 // 1. INITIAL DATA — imported from your Excel files (source of truth: Net Pay Check Calculation.xlsx)
 // ============================================================================
@@ -4961,6 +4988,195 @@ saveState(STATE);
 
 // Expose a few things globally for debugging in the browser console
 window._payroll = { STATE, INITIAL_DATA, ytdTotals, showView, viewPaystub };
+
+
+// ============================================================================
+// PHASE 2 CHUNK 4b — SUPABASE AUTH: session check + view toggle
+// ============================================================================
+//
+// Creates the Supabase client and decides which view to show:
+//   - If user has an active session -> show the app
+//   - If not -> show the login view
+//   - If running from file:// (local dev) -> skip auth entirely
+//
+// Also listens for auth state changes so that when the user logs in via
+// magic link (4c) or signs out (4d), the view swaps immediately without
+// requiring a page refresh.
+//
+
+// Create the client instance once, at module load. Reused everywhere.
+// Named `supabaseClient` to avoid shadowing the global `supabase` from the CDN.
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+
+// Toggle helpers — keep view logic in one place so 4c/4d can reuse them.
+function showAppView() {
+  document.querySelector('.app').style.display = '';        // revert to CSS default (grid)
+  document.getElementById('loginView').style.display = 'none';
+}
+
+function showLoginView() {
+  document.querySelector('.app').style.display = 'none';
+  document.getElementById('loginView').style.display = '';  // revert to CSS default (flex)
+}
+
+
+// ---- PHASE 2 CHUNK 4c — MAGIC LINK SEND ----
+// Called when the user submits the login form. Validates the email, then
+// asks Supabase to email a one-click magic link. Shows status messages in
+// the #loginStatus div. All UI state (button disabled, button text, status
+// color) is restored cleanly whether the request succeeds or fails.
+//
+// Requires Supabase's "Redirect URLs" allowlist to include the current
+// origin (see Chunk 6). Without that, the email will arrive but clicking
+// the link will fail with a redirect error on Supabase's side.
+//
+async function sendMagicLink() {
+  const emailInput = document.getElementById('loginEmail');
+  const sendBtn    = document.getElementById('loginSendBtn');
+
+  const email = (emailInput.value || '').trim();
+
+  // Basic validation — fail fast before hitting the network
+  if (!email) {
+    showLoginStatus('error', 'Please enter your email address.');
+    return;
+  }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    showLoginStatus('error', 'Please enter a valid email address.');
+    return;
+  }
+
+  // UI: disable button, show in-progress status
+  sendBtn.disabled    = true;
+  const originalText  = sendBtn.textContent;
+  sendBtn.textContent = 'Sending...';
+  showLoginStatus('info', 'Sending magic link...');
+
+  try {
+    const { error } = await supabaseClient.auth.signInWithOtp({
+      email: email,
+      options: {
+        // Redirect back to the current URL after user clicks the email link.
+        // Must be in the Supabase Redirect URLs allowlist (Chunk 6).
+        emailRedirectTo: window.location.href
+      }
+    });
+
+    if (error) {
+      showLoginStatus('error', error.message || 'Could not send the magic link. Please try again.');
+    } else {
+      showLoginStatus('success',
+        `Magic link sent to ${email}. Check your inbox (and spam folder) and click the link to sign in.`);
+    }
+  } catch (err) {
+    // Network failures, unexpected exceptions, etc.
+    showLoginStatus('error', 'Something went wrong. Please check your internet and try again.');
+  } finally {
+    // Re-enable the button in ALL cases so the user can retry if needed
+    sendBtn.disabled    = false;
+    sendBtn.textContent = originalText;
+  }
+}
+
+
+// Helper: write a message into the login status div with the right color class.
+// kind is one of 'info' | 'success' | 'error' (matches the CSS classes
+// .login-status-info / .login-status-success / .login-status-error from Chunk 3).
+function showLoginStatus(kind, message) {
+  const statusDiv     = document.getElementById('loginStatus');
+  statusDiv.className = 'login-status login-status-' + kind;
+  statusDiv.textContent = message;
+  statusDiv.style.display = '';  // make visible (it starts with display:none)
+}
+
+
+// ---- PHASE 2 CHUNK 4d — SIGN OUT + AUTH ACCOUNT DISPLAY ----
+// Provides the Sign out button handler, plus a helper that keeps the
+// sidebar's "Signed in as..." UI in sync with the current auth state.
+//
+// Approach: this block installs its OWN subscription to onAuthStateChange
+// so that 4b's initAuth remains untouched. Both subscriptions coexist
+// (Supabase allows multiple listeners). This keeps each chunk's code
+// self-contained for easy rollback.
+//
+
+// Handler for the sidebar "Sign out" button.
+async function signOut() {
+  try {
+    const { error } = await supabaseClient.auth.signOut();
+    if (error) {
+      alert('Could not sign out: ' + (error.message || 'unknown error'));
+      return;
+    }
+    // On successful sign-out, the onAuthStateChange listener from 4b fires
+    // with session === null and automatically swaps to the login view.
+    // Nothing else to do here.
+  } catch (err) {
+    alert('Could not sign out. Please check your internet and try again.');
+  }
+}
+
+
+// Populate / hide the "Signed in as [email]" block based on current session.
+function updateAuthAccountDisplay(session) {
+  const authAccountDiv = document.getElementById('authAccount');
+  const authEmailDiv   = document.getElementById('authEmail');
+  if (!authAccountDiv || !authEmailDiv) return;  // defensive
+
+  if (session && session.user && session.user.email) {
+    authEmailDiv.textContent    = session.user.email;
+    authAccountDiv.style.display = '';  // revert to default (block)
+  } else {
+    authAccountDiv.style.display = 'none';
+  }
+}
+
+
+// Run once at load to set the initial state, then keep it in sync with
+// any future auth changes. Independent of 4b's initAuth flow.
+(async function initAuthAccountDisplay() {
+  try {
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    updateAuthAccountDisplay(session);
+  } catch (err) {
+    // Network or other failure — leave display hidden (safe default)
+  }
+  supabaseClient.auth.onAuthStateChange((event, session) => {
+    updateAuthAccountDisplay(session);
+  });
+})();
+
+
+// Decide which view to show on page load.
+async function initAuth() {
+  // DEVELOPMENT BYPASS: file:// has no HTTPS, so magic links can't work.
+  // Skip auth so the local app stays usable while cloud auth is being built.
+  // TODO: Remove this bypass in Phase 5 (cloud-only cutover).
+  if (window.location.protocol === 'file:') {
+    showAppView();
+    return;
+  }
+
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  if (session) {
+    showAppView();
+  } else {
+    showLoginView();
+  }
+
+  // Fires on SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED, etc.
+  // Lets the view swap automatically after a magic-link redirect or sign-out.
+  supabaseClient.auth.onAuthStateChange((event, session) => {
+    if (session) {
+      showAppView();
+    } else {
+      showLoginView();
+    }
+  });
+}
+
+initAuth();
 </script>
 </body>
 </html>
