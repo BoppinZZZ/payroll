@@ -5174,6 +5174,86 @@ const DAL = {
     return data || [];
   },
 
+
+  // ---- 4d-3a ---------------------------------------------------------------
+  // Fetch pay periods the current user is allowed to see.
+  // RLS: pay_periods_read_all allows any authenticated user to SELECT.
+  // Options:
+  //   year  — if provided, only return that year's periods
+  // Ordered by year then pp_number ascending.
+  //
+  // Test from console:
+  //   await DAL.getPayPeriods()                 // all periods across all years
+  //   await DAL.getPayPeriods({ year: 2026 })   // only 2026
+  async getPayPeriods({ year } = {}) {
+    let q = supabaseClient
+      .from('pay_periods')
+      .select('id, pp_number, year, start_date, end_date, pay_date, status')
+      .order('year',      { ascending: true })
+      .order('pp_number', { ascending: true });
+
+    if (year != null) {
+      q = q.eq('year', year);
+    }
+
+    const { data, error } = await q;
+    if (error) {
+      console.error('DAL.getPayPeriods error:', error);
+      throw error;
+    }
+    return data || [];
+  },
+
+
+  // ---- 4d-3b ---------------------------------------------------------------
+  // Fetch paystubs the current user is allowed to see, with each row's
+  // pay_period nested inside for convenience.
+  // RLS: admin sees all (paystubs_admin_all).
+  //      employee sees only their own NON-VOIDED paystubs (paystubs_read_own).
+  // Options:
+  //   includeVoided  — default false. Set true on admin History when the
+  //                    "Show voided" toggle is ON.
+  //   employeeId     — optional UUID. Filters to one employee. Useful when
+  //                    we only need a specific person's history.
+  // Returns an array; caller can re-sort by pay_period.end_date if needed.
+  //
+  // NOTE: `voided` is a boolean. When this is called as an employee with
+  // includeVoided=true, RLS still hides voided rows (the employee policy
+  // requires voided=false), so this option has no effect for employees.
+  //
+  // Test from console (after logging in as admin):
+  //   await DAL.getPaystubs()
+  //   await DAL.getPaystubs({ includeVoided: true })
+  async getPaystubs({ includeVoided = false, employeeId = null } = {}) {
+    let q = supabaseClient
+      .from('paystubs')
+      .select(`
+        id, timesheet_id, employee_id, pay_period_id,
+        hours, mileage_miles, mileage_amount, reimbursement_amount, gross,
+        fit, ss_ee, medicare_ee, addl_medicare, ca_pit, sdi,
+        net_pay,
+        ss_er, medicare_er, suta, ett, futa,
+        finalized_at, finalized_by,
+        voided, voided_at, voided_by, voided_reason,
+        edit_count, last_edited_at, last_edited_by,
+        pay_period:pay_periods(id, pp_number, year, start_date, end_date, pay_date, status)
+      `);
+
+    if (!includeVoided) {
+      q = q.eq('voided', false);
+    }
+    if (employeeId) {
+      q = q.eq('employee_id', employeeId);
+    }
+
+    const { data, error } = await q;
+    if (error) {
+      console.error('DAL.getPaystubs error:', error);
+      throw error;
+    }
+    return data || [];
+  },
+
 };
 
 
