@@ -548,6 +548,14 @@
     font-size: 12px;
     color: var(--muted);
   }
+
+  /* ==========================================================================
+     PHASE 3 CHUNK 3b — ROLE GATING (UI LAYER)
+     Elements with the `.admin-only` class are hidden when the body has the
+     `role-employee` class. No effect on admin users. Defense-in-depth
+     JS checks come in Chunk 3c; data scoping comes in Chunk 3d.
+     ========================================================================== */
+  body.role-employee .admin-only { display: none !important; }
 </style>
 </head>
 <body>
@@ -595,20 +603,20 @@
     </div>
 
     <div class="nav-label">Workspace</div>
-    <div class="nav-item active" data-view="dashboard"><span class="icon">◆</span> Dashboard</div>
-    <div class="nav-item" data-view="employees"><span class="icon">◆</span> Employees</div>
+    <div class="nav-item active admin-only" data-view="dashboard"><span class="icon">◆</span> Dashboard</div>
+    <div class="nav-item admin-only" data-view="employees"><span class="icon">◆</span> Employees</div>
     <div class="nav-item" data-view="run-payroll"><span class="icon">◆</span> Run Payroll</div>
     <div class="nav-item" data-view="history"><span class="icon">◆</span> History</div>
-    <div class="nav-item" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
+    <div class="nav-item admin-only" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
 
     <div class="nav-label">Setup</div>
-    <div class="nav-item" data-view="settings"><span class="icon">◆</span> Settings</div>
-    <div class="nav-item" data-view="tax-rates"><span class="icon">◆</span> Tax Rates</div>
+    <div class="nav-item admin-only" data-view="settings"><span class="icon">◆</span> Settings</div>
+    <div class="nav-item admin-only" data-view="tax-rates"><span class="icon">◆</span> Tax Rates</div>
 
     <div class="sidebar-footer">
       <div>Current pay period</div>
       <strong style="color:#e2e8f0;" id="current-period-label">PP9 · Apr 18 – May 1, 2026</strong>
-      <button class="footer-btn" onclick="handleResetData()" title="Reload the original imported Excel data, discarding any changes">Reset to imported data</button>
+      <button class="footer-btn admin-only" onclick="handleResetData()" title="Reload the original imported Excel data, discarding any changes">Reset to imported data</button>
 
       <!-- PHASE 2 CHUNK 4d — Auth account section -->
       <!-- Shown only when the user has an active Supabase session. Hidden by -->
@@ -733,6 +741,21 @@
 //
 const SUPABASE_URL = "https://abjxgrstteqjitfzbant.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFianhncnN0dGVxaml0ZnpiYW50Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MTk2NzMsImV4cCI6MjA5MjI5NTY3M30.XRTJ7qTXRuwSr4UjtIJBVOSV7YIdywk6t7emcVnT3pE";
+
+
+// ============================================================================
+// 0b. ROLE-GATING GLOBALS — declared early to avoid TDZ on initial render
+// ----------------------------------------------------------------------------
+// These identifiers are referenced inside showView(), which runs on page load
+// BEFORE the Phase 3 3a/3c code blocks further down. Declaring them up here
+// guarantees they exist (as null / the constant) before any read.
+// The actual profile values are populated later by loadCurrentUserProfile().
+// Added: 2026-04-21 (Phase 3 Chunk 3c-1 — TDZ fix, Option B)
+// ============================================================================
+let currentUserRole = null;   // 'admin' | 'employee' | null (not signed in)
+let currentUserId   = null;   // UUID of signed-in user, or null
+let currentUserName = null;   // full_name from profiles, or null
+const ADMIN_ONLY_VIEWS = ['dashboard', 'employees', 'tax-filings', 'settings', 'tax-rates'];
 
 
 // ============================================================================
@@ -1633,8 +1656,8 @@ function renderDashboard() {
         <div class="page-sub">YTD snapshot · ${STATE.employees.length} employees · 2026 tax year</div>
       </div>
       <div style="display:flex; gap:8px;">
-        <button class="btn" onclick="exportBackup()" title="Download a JSON snapshot of all data to your Downloads folder">Export backup</button>
-        <button class="btn" onclick="triggerImportBackup()" title="Restore from a .json backup file (replaces all current data)">Import backup</button>
+        <button class="btn admin-only" onclick="exportBackup()" title="Download a JSON snapshot of all data to your Downloads folder">Export backup</button>
+        <button class="btn admin-only" onclick="triggerImportBackup()" title="Restore from a .json backup file (replaces all current data)">Import backup</button>
         <button class="btn primary" onclick="showView('run-payroll')" title="Open the PP9 data-entry page">+ Run Payroll</button>
       </div>
     </div>
@@ -1713,7 +1736,7 @@ function renderEmployees() {
     const t = ytdTotals(emp.periods);
     const last = emp.periods[emp.periods.length - 1];
     // Actions column — Edit is always available; second button is Remove (if active) or Reactivate (if inactive)
-    const editBtn = `<button class="btn small ghost" onclick="openEditEmployeeModal('${emp.id}')" title="Edit name, title, rate, or avatar" style="color: var(--primary);">Edit</button>`;
+    const editBtn = `<button class="btn small ghost admin-only" onclick="openEditEmployeeModal('${emp.id}')" title="Edit name, title, rate, or avatar" style="color: var(--primary);">Edit</button>`;
     const secondBtn = emp.active
       ? `<button class="btn small ghost danger" onclick="confirmRemoveEmployee('${emp.id}')" title="Remove or deactivate this employee">Remove</button>`
       : `<button class="btn small ghost" onclick="reactivateEmployee('${emp.id}')" title="Bring this employee back to Active" style="color: var(--primary);">Reactivate</button>`;
@@ -1741,7 +1764,7 @@ function renderEmployees() {
         <div class="page-title">Employees</div>
         <div class="page-sub">${STATE.employees.length} total</div>
       </div>
-      <button class="btn primary" onclick="openAddEmployeeModal()" title="Open the Add Employee form">+ Add Employee</button>
+      <button class="btn primary admin-only" onclick="openAddEmployeeModal()" title="Open the Add Employee form">+ Add Employee</button>
     </div>
 
     <div class="panel">
@@ -1764,7 +1787,28 @@ function renderEmployees() {
   `;
 }
 
+// ============================================================================
+// PHASE 3 CHUNK 3d — NON-ADMIN STUB
+// Minimal placeholder shown to non-admin users on Run Payroll and History
+// views until proper per-user data scoping lands in Phase 4 (Supabase RLS).
+// Keeps employees from seeing other employees' data while the bridge between
+// auth.users and STATE.employees is being built.
+// ============================================================================
+function renderNonAdminStub() {
+  return `
+    <div style="max-width:560px; margin:80px auto 0; padding:32px 28px; background:white; border:1px solid var(--border); border-radius:12px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+      <h2 style="margin:0 0 16px; font-size:20px; color:var(--text);">Account setup in progress</h2>
+      <p style="margin:0 0 24px; color:#4b5563; line-height:1.6;">
+        Welcome! Your timesheet will appear here once your admin links your account to your employee record. This usually takes just a few minutes — please reach out to your administrator.
+      </p>
+      <a class="btn primary" href="mailto:chrischan9231@gmail.com?subject=Payroll%20App%20Account%20Setup" style="text-decoration:none;">Contact admin</a>
+    </div>
+  `;
+}
+
 function renderHistory() {
+  if (currentUserRole !== 'admin') return renderNonAdminStub();
+
   // Count all voided paystubs across all employees for the toggle button
   const totalVoided = STATE.employees.reduce(
     (n, emp) => n + emp.periods.filter(p => p.voided).length,
@@ -1830,7 +1874,7 @@ function renderHistory() {
 
   // Toggle button: only shown if at least one voided paystub exists
   const toggleButton = totalVoided > 0
-    ? `<button class="btn" onclick="toggleHistoryShowVoided()">${historyShowVoided ? "Hide" : "Show"} ${totalVoided} voided paystub${totalVoided === 1 ? "" : "s"}</button>`
+    ? `<button class="btn admin-only" onclick="toggleHistoryShowVoided()">${historyShowVoided ? "Hide" : "Show"} ${totalVoided} voided paystub${totalVoided === 1 ? "" : "s"}</button>`
     : "";
 
   return `
@@ -2598,9 +2642,9 @@ function renderPaystub(employeeId, pp) {
   //   - Not voided: [Back to History] [Edit] [Void] [Print]
   //   - Voided:     [Back to History] [Restore] [Print]   (Edit hidden so you must Restore first)
   const actionButtons = isVoided
-    ? `<button class="btn" style="color:var(--primary);" onclick="restorePaystub('${emp.id}', ${p.pp})" title="Restore this voided paystub">Restore</button>`
-    : `<button class="btn" style="color:var(--primary);" onclick="openEditPaystubModal('${emp.id}', ${p.pp})" title="Edit hours, miles, or reimbursement">Edit</button>
-       <button class="btn" style="color:var(--red);" onclick="voidPaystub('${emp.id}', ${p.pp})" title="Mark this paystub as voided (soft delete, can be restored)">Void</button>`;
+    ? `<button class="btn admin-only" style="color:var(--primary);" onclick="restorePaystub('${emp.id}', ${p.pp})" title="Restore this voided paystub">Restore</button>`
+    : `<button class="btn admin-only" style="color:var(--primary);" onclick="openEditPaystubModal('${emp.id}', ${p.pp})" title="Edit hours, miles, or reimbursement">Edit</button>
+       <button class="btn admin-only" style="color:var(--red);" onclick="voidPaystub('${emp.id}', ${p.pp})" title="Mark this paystub as voided (soft delete, can be restored)">Void</button>`;
 
   return `
     <div class="page-header">
@@ -3032,6 +3076,8 @@ function currentPeriodEmployeeStatus(emp) {
 
 // Main Run Payroll view renderer — dispatches to picker or single-employee entry
 function renderRunPayroll() {
+  if (currentUserRole !== 'admin') return renderNonAdminStub();
+
   if (runPayrollSelectedEmp) {
     // Guard: if the selected employee was removed/deactivated while on the entry view,
     // fall back to picker so we never render a broken entry screen.
@@ -3693,6 +3739,8 @@ function rolloverToNextPeriod() {
 // ============================================================================
 
 function exportBackup() {
+  if (!requireAdmin('Export Backup')) return;
+
   const snapshot = {
     schema_version: 1,
     exported_at: new Date().toISOString(),
@@ -3715,6 +3763,8 @@ function exportBackup() {
 }
 
 function triggerImportBackup() {
+  if (!requireAdmin('Import Backup')) return;
+
   // Hidden file input — created fresh each time so re-selecting the same file fires onchange.
   const input = document.createElement("input");
   input.type = "file";
@@ -3724,6 +3774,8 @@ function triggerImportBackup() {
 }
 
 function handleImportBackupFile(evt) {
+  if (!requireAdmin('Import Backup')) return;
+
   const file = evt.target.files && evt.target.files[0];
   if (!file) return;
   const reader = new FileReader();
@@ -4072,6 +4124,13 @@ function renderTaxRates() {
 // ============================================================================
 
 function showView(viewName) {
+  // [3c-1] ROLE GUARD: redirect non-admins away from admin-only views.
+  // Single choke-point for all navigation (nav clicks, onclick handlers,
+  // and the initial showView call on page load).
+  if (currentUserRole !== 'admin' && ADMIN_ONLY_VIEWS.includes(viewName)) {
+    console.warn('[role-gate] Employee redirected from', viewName, 'to run-payroll');
+    viewName = 'run-payroll';
+  }
   currentView = viewName;
   currentPaystubContext = null;
   depositSummaryContext = null;
@@ -4338,6 +4397,8 @@ function printDepositSummary() {
 let paystubEditingContext = null;
 
 function openEditPaystubModal(employeeId, pp) {
+  if (!requireAdmin('Edit Paystub')) return;
+
   const emp = STATE.employees.find(e => e.id === employeeId);
   if (!emp) { alert("Employee not found."); return; }
   const p = emp.periods.find(x => x.pp === pp);
@@ -4414,6 +4475,8 @@ function wouldSsCapRippleAffectLaterPaystubs(emp, pp, oldGross, newGross) {
 }
 
 function submitEditPaystub() {
+  if (!requireAdmin('Save Paystub Edit')) return;
+
   if (!paystubEditingContext) { alert("No paystub is being edited. Please close and try again."); return; }
   const { employeeId, pp } = paystubEditingContext;
   const emp = STATE.employees.find(e => e.id === employeeId);
@@ -4521,6 +4584,8 @@ function submitEditPaystub() {
 // ============================================================================
 
 function voidPaystub(employeeId, pp) {
+  if (!requireAdmin('Void Paystub')) return;
+
   const emp = STATE.employees.find(e => e.id === employeeId);
   if (!emp) { alert("Employee not found."); return; }
   const p = emp.periods.find(x => x.pp === pp);
@@ -4542,6 +4607,8 @@ function voidPaystub(employeeId, pp) {
 }
 
 function restorePaystub(employeeId, pp) {
+  if (!requireAdmin('Restore Paystub')) return;
+
   const emp = STATE.employees.find(e => e.id === employeeId);
   if (!emp) { alert("Employee not found."); return; }
   const p = emp.periods.find(x => x.pp === pp);
@@ -4572,12 +4639,16 @@ function restorePaystub(employeeId, pp) {
 let historyShowVoided = false;
 
 function toggleHistoryShowVoided() {
+  if (!requireAdmin('Show Voided Paystubs')) return;
+
   historyShowVoided = !historyShowVoided;
   const main = document.getElementById("main-content");
   if (main) main.innerHTML = renderHistory();
 }
 
 function handleResetData() {
+  if (!requireAdmin('Reset to Imported Data')) return;
+
   if (confirm("Reset all data to the originally imported Excel values? This will discard any changes.")) {
     STATE = deepClone(INITIAL_DATA);
     saveState(STATE);
@@ -4600,6 +4671,8 @@ let empModalEditingId = null;
 
 // Open the Add Employee modal: reset form fields, clear errors, show modal, focus name input
 function openAddEmployeeModal() {
+  if (!requireAdmin('Add Employee')) return;
+
   // Put the modal into Add mode
   empModalEditingId = null;
 
@@ -4641,6 +4714,8 @@ function openAddEmployeeModal() {
 // Open the modal in Edit mode, prefilled with an existing employee's values.
 // The Active checkbox is hidden here — use Remove / Reactivate on the Employees page for that.
 function openEditEmployeeModal(empId) {
+  if (!requireAdmin('Edit Employee')) return;
+
   const emp = STATE.employees.find(e => e.id === empId);
   if (!emp) { alert("Employee not found."); return; }
 
@@ -4763,6 +4838,8 @@ function handleEmpNameInput() {
 //   <id>  → applyEmployeeEdit (Edit mode)
 // Validation is the same in both modes; the dispatcher lives here to avoid duplication.
 function submitEmployeeModal() {
+  if (!requireAdmin('Save Employee')) return;
+
   // Read and trim all inputs
   const nameRaw = document.getElementById("emp-form-name").value.trim();
   const titleRaw = document.getElementById("emp-form-title").value.trim();
@@ -5009,6 +5086,47 @@ window._payroll = { STATE, INITIAL_DATA, ytdTotals, showView, viewPaystub };
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 
+// ============================================================================
+// ---- PHASE 4 CHUNK 4d — DATA ACCESS LAYER (DAL) ----
+// ============================================================================
+// Wraps all Supabase table reads/writes behind a single `DAL` namespace so
+// the rest of the app can migrate off localStorage one view at a time.
+//
+// IMPORTANT: Adding methods to this DAL is ADDITIVE. Nothing in the existing
+// render/save code paths calls these methods yet. Each sub-chunk (4d-1,
+// 4d-2, ...) adds one or two methods that can be tested from the browser
+// console (e.g. `await DAL.getCompany()`) before being wired into the app
+// in Chunks 4e (reads) and 4f (writes).
+
+const DAL = {
+
+  // ---- 4d-1 ----------------------------------------------------------------
+  // Fetch the single company row from public.companies.
+  // RLS: companies_read_all allows any authenticated user to SELECT.
+  // Returns the raw row (or null if the table is empty — shouldn't happen
+  // after Migration #04). Throws on query error so the caller sees a clear
+  // failure instead of a silent null.
+  //
+  // Test from console (after logging in):
+  //   await DAL.getCompany()
+  //   // -> { name: "Anna H. Lee CPA", ein: "85-1587660", street: "1494 ...", ... }
+  async getCompany() {
+    const { data, error } = await supabaseClient
+      .from('companies')
+      .select('name, legal_name, ein, ca_employer_account, street, city, state, zip, phone, email, mileage_rate, pay_frequency')
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.error('DAL.getCompany error:', error);
+      throw error;
+    }
+    return data; // may be null
+  },
+
+};
+
+
 // Toggle helpers — keep view logic in one place so 4c/4d can reuse them.
 function showAppView() {
   document.querySelector('.app').style.display = '';        // revert to CSS default (grid)
@@ -5146,6 +5264,131 @@ function updateAuthAccountDisplay(session) {
     updateAuthAccountDisplay(session);
   });
 })();
+
+
+// ============================================================================
+// PHASE 3 CHUNK 3a — CURRENT USER PROFILE CACHE
+// Loads the signed-in user's profile row from public.profiles after login
+// and caches role/id/full_name in global variables. No UI changes in this
+// chunk — just the data plumbing. Later chunks (3b, 3c, 3d) read these.
+//
+// NOTE: The globals `currentUserRole`, `currentUserId`, `currentUserName` are
+// declared earlier in the script (section 0b) to avoid a TDZ error when
+// showView() runs on initial page load. This section only writes to them.
+// ============================================================================
+
+async function loadCurrentUserProfile(session) {
+  // No session → clear cache (signed out or not yet signed in).
+  if (!session || !session.user) {
+    currentUserRole = null;
+    currentUserId   = null;
+    currentUserName = null;
+    return;
+  }
+
+  // Normal cloud login — query public.profiles for this user's row.
+  try {
+    const { data, error } = await supabaseClient
+      .from('profiles')
+      .select('id, role, full_name')
+      .eq('id', session.user.id)
+      .single();
+
+    if (error) {
+      console.warn('[auth] Could not load profile:', error.message);
+      currentUserRole = null;
+      currentUserId   = session.user.id;
+      currentUserName = null;
+      return;
+    }
+
+    currentUserId   = data.id;
+    currentUserRole = data.role;
+    currentUserName = data.full_name;
+    console.log('[auth] Profile loaded: role=' + currentUserRole + ', name=' + currentUserName);
+  } catch (err) {
+    console.warn('[auth] loadCurrentUserProfile error:', err);
+    currentUserRole = null;
+    currentUserId   = null;
+    currentUserName = null;
+  }
+}
+
+// Parallel listener — does not modify initAuth() or initAuthAccountDisplay.
+// Runs alongside them, loads the profile whenever the session changes.
+(async function initCurrentUserProfile() {
+  applyRoleGating();                                              // [3b] fail-closed default: hide admin UI until role confirmed
+
+  // Dev mode (file://) — Supabase isn't used locally. Fake admin so the app
+  // behaves normally during local testing.
+  if (window.location.protocol === 'file:') {
+    currentUserRole = 'admin';
+    currentUserId   = 'dev-local';
+    currentUserName = 'Dev (local)';
+    console.log('[auth] Dev mode: currentUserRole =', currentUserRole);
+    applyRoleGating();                                            // [3b] apply gating after dev role set
+    return;
+  }
+
+  // Cloud mode — load profile from Supabase once now, then keep in sync
+  // with future sign-in / sign-out events.
+  try {
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    await loadCurrentUserProfile(session);
+    applyRoleGating();                                            // [3b] apply gating after cloud role load
+  } catch (err) {
+    console.warn('[auth] initCurrentUserProfile getSession error:', err);
+    applyRoleGating();                                            // [3b] still apply gating on error (fail closed)
+  }
+
+  supabaseClient.auth.onAuthStateChange(async (event, session) => {
+    await loadCurrentUserProfile(session);
+    applyRoleGating();                                            // [3b] re-apply gating on sign-in / sign-out
+  });
+})();
+
+
+// ============================================================================
+// PHASE 3 CHUNK 3b — ROLE GATING (UI LAYER)
+// Toggles a body class so CSS can hide admin-only elements from employees.
+// Safe to call repeatedly; no-op if class state already matches role.
+// ============================================================================
+function applyRoleGating() {
+  const body = document.body;
+  if (!body) return;  // defensive — body should always exist by the time this runs
+  if (currentUserRole === 'admin') {
+    body.classList.add('role-admin');
+    body.classList.remove('role-employee');
+  } else {
+    // 'employee', null, or anything else = not confirmed admin = gated
+    body.classList.add('role-employee');
+    body.classList.remove('role-admin');
+  }
+}
+
+
+// ============================================================================
+// PHASE 3 CHUNK 3c — ROLE GATING (JS LAYER / DEFENSE-IN-DEPTH)
+// These guards prevent non-admin users from running admin-only actions even
+// if the CSS hiding in 3b is bypassed (e.g., via browser console). The real
+// enforcement layer is Supabase RLS in Phase 4; these are UX + sanity guards.
+// ============================================================================
+
+// Returns true if the current user is admin. Otherwise shows an alert and
+// returns false. Call sites use `if (!requireAdmin('...')) return;` as a
+// one-line guard at the top of admin-only functions.
+function requireAdmin(actionName) {
+  if (currentUserRole !== 'admin') {
+    alert('This action is only available to admins.');
+    console.warn('[role-gate] Non-admin blocked from action:', actionName);
+    return false;
+  }
+  return true;
+}
+
+// NOTE: The `ADMIN_ONLY_VIEWS` constant used by showView's role guard is
+// declared earlier in the script (section 0b) to avoid a TDZ error during
+// the initial showView("dashboard") call on page load.
 
 
 // Decide which view to show on page load.
