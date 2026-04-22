@@ -5124,6 +5124,56 @@ const DAL = {
     return data; // may be null
   },
 
+
+  // ---- 4d-2a ---------------------------------------------------------------
+  // Fetch the tax_rates row for a given year (e.g. DAL.getTaxRates(2026)).
+  // RLS: tax_rates_read_all allows any authenticated user to SELECT.
+  // Returns null if that year has no row (caller should surface a clear
+  // error rather than silently running with nothing).
+  //
+  // Test from console (after logging in):
+  //   await DAL.getTaxRates(2026)
+  //   // -> { year: 2026, ss_ee: "0.062000", medicare_ee: "0.014500", ... }
+  async getTaxRates(year) {
+    const { data, error } = await supabaseClient
+      .from('tax_rates')
+      .select('year, ss_ee, medicare_ee, addl_medicare, fed_flat, ca_flat, ca_sdi, ss_er, medicare_er, suta, ett, futa, ss_wage_base, addl_medicare_threshold_single, state_unemployment_wage_base')
+      .eq('year', year)
+      .maybeSingle();
+
+    if (error) {
+      console.error('DAL.getTaxRates error:', error);
+      throw error;
+    }
+    return data; // may be null
+  },
+
+
+  // ---- 4d-2b ---------------------------------------------------------------
+  // Fetch all employees the current user is allowed to see.
+  // RLS: admin sees all rows (employees_admin_all).
+  //      employee sees only their own row (employees_read_self, filters by
+  //      profile_id = auth.uid()).
+  // Returns an array (possibly empty). Ordered by employee_id ascending so
+  // the list is stable across calls, matching how the old app displayed them.
+  //
+  // Test from console (after logging in as admin):
+  //   await DAL.getEmployees()
+  //   // -> [ { employee_id: "E-001", name: "Christopher Chan", ... },
+  //   //      { employee_id: "E-002", name: "Annie Cheng", ... } ]
+  async getEmployees() {
+    const { data, error } = await supabaseClient
+      .from('employees')
+      .select('id, profile_id, employee_id, name, title, hourly_rate, avatar, active')
+      .order('employee_id', { ascending: true });
+
+    if (error) {
+      console.error('DAL.getEmployees error:', error);
+      throw error;
+    }
+    return data || [];
+  },
+
 };
 
 
