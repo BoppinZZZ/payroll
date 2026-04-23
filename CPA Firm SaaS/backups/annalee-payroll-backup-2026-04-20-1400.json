@@ -1,0 +1,542 @@
+{
+  "schema_version": 1,
+  "exported_at": "2026-04-20T21:00:32.074Z",
+  "app_name": "Anna Lee CPA Payroll",
+  "data": {
+    "company": {
+      "name": "Anna H. Lee CPA",
+      "address_line1": "1494 Hamilton Way, Suite 102",
+      "address_line2": "San Jose, CA 95125",
+      "legal_name": "",
+      "ein": "85-1587660",
+      "ca_employer_account": "277-0509-4",
+      "street": "1494 Hamilton Way, Suite 102",
+      "city": "San Jose",
+      "state": "CA",
+      "zip": "95125",
+      "phone": "(408)-300-9676",
+      "email": "anna@annahleecpa.com"
+    },
+    "tax_rates": {
+      "ss_ee": 0.062,
+      "ss_er": 0.062,
+      "medicare_ee": 0.0145,
+      "medicare_er": 0.0145,
+      "addl_medicare": 0.009,
+      "fed_flat": 0.1,
+      "ca_flat": 0.044,
+      "ca_sdi": 0.013,
+      "suta": 0.034,
+      "ett": 0.001,
+      "futa": 0.006,
+      "ss_wage_base": 184500,
+      "addl_medicare_threshold_single": 200000,
+      "state_unemployment_wage_base": 7000
+    },
+    "mileage_rate": 0.725,
+    "pay_frequency": "bi-weekly",
+    "current_period": {
+      "pp": 9,
+      "start": "2026-04-18",
+      "end": "2026-05-01",
+      "pay_date": "2026-05-02"
+    },
+    "employees": [
+      {
+        "id": "chris",
+        "name": "Christopher Chan",
+        "title": "HR Generalist",
+        "hourly_rate": 25,
+        "avatar": "CC",
+        "active": true,
+        "periods": [
+          {
+            "pp": 1,
+            "end_date": "2026-01-09",
+            "total_hours": 8,
+            "gross_pay": 200,
+            "mileage_miles": 0,
+            "mileage_dollars": 0,
+            "reimbursement": 0,
+            "gross_plus_reimb": 200,
+            "taxes": {
+              "federal": 20,
+              "ca_state": 8.8,
+              "ss": 12.4,
+              "medicare": 2.9,
+              "ca_sdi": 2.6
+            },
+            "net_pay": 153.3
+          },
+          {
+            "pp": 2,
+            "end_date": "2026-01-23",
+            "total_hours": 13.5,
+            "gross_pay": 337.5,
+            "mileage_miles": 16.8,
+            "mileage_dollars": 12.18,
+            "reimbursement": 41.09,
+            "gross_plus_reimb": 390.77,
+            "taxes": {
+              "federal": 33.75,
+              "ca_state": 14.85,
+              "ss": 20.93,
+              "medicare": 4.89,
+              "ca_sdi": 4.39
+            },
+            "net_pay": 311.96
+          },
+          {
+            "pp": 3,
+            "end_date": "2026-02-06",
+            "total_hours": 18.85,
+            "gross_pay": 471.25,
+            "mileage_miles": 0,
+            "mileage_dollars": 0,
+            "reimbursement": 0,
+            "gross_plus_reimb": 471.25,
+            "taxes": {
+              "federal": 47.13,
+              "ca_state": 20.74,
+              "ss": 29.22,
+              "medicare": 6.83,
+              "ca_sdi": 6.13
+            },
+            "net_pay": 361.21
+          },
+          {
+            "pp": 4,
+            "end_date": "2026-02-20",
+            "total_hours": 39.08,
+            "gross_pay": 977.08,
+            "mileage_miles": 19.4,
+            "mileage_dollars": 14.07,
+            "reimbursement": 40.45,
+            "gross_plus_reimb": 1031.6,
+            "taxes": {
+              "federal": 97.71,
+              "ca_state": 42.99,
+              "ss": 60.58,
+              "medicare": 14.17,
+              "ca_sdi": 12.7
+            },
+            "net_pay": 803.45
+          },
+          {
+            "pp": 5,
+            "end_date": "2026-03-06",
+            "total_hours": 48.45,
+            "gross_pay": 1211.25,
+            "mileage_miles": 42,
+            "mileage_dollars": 30.45,
+            "reimbursement": 67.44,
+            "gross_plus_reimb": 1309.14,
+            "taxes": {
+              "federal": 121.13,
+              "ca_state": 53.3,
+              "ss": 75.1,
+              "medicare": 17.56,
+              "ca_sdi": 15.75
+            },
+            "net_pay": 1026.3
+          },
+          {
+            "pp": 6,
+            "end_date": "2026-03-20",
+            "total_hours": 57.27,
+            "gross_pay": 1431.67,
+            "mileage_miles": 43,
+            "mileage_dollars": 31.18,
+            "reimbursement": 32.05,
+            "gross_plus_reimb": 1494.9,
+            "taxes": {
+              "federal": 143.17,
+              "ca_state": 62.99,
+              "ss": 88.76,
+              "medicare": 20.76,
+              "ca_sdi": 18.61
+            },
+            "net_pay": 1160.61
+          },
+          {
+            "pp": 7,
+            "end_date": "2026-04-03",
+            "total_hours": 65.77,
+            "gross_pay": 1644.17,
+            "mileage_miles": 121.2,
+            "mileage_dollars": 87.87,
+            "reimbursement": 53.9,
+            "gross_plus_reimb": 1785.94,
+            "taxes": {
+              "federal": 164.42,
+              "ca_state": 72.34,
+              "ss": 101.94,
+              "medicare": 23.84,
+              "ca_sdi": 21.37
+            },
+            "net_pay": 1402.03
+          },
+          {
+            "pp": 8,
+            "end_date": "2026-04-17",
+            "total_hours": 74.25,
+            "gross_pay": 1856.25,
+            "mileage_miles": 91.2,
+            "mileage_dollars": 66.12,
+            "reimbursement": 125.54,
+            "gross_plus_reimb": 2047.91,
+            "taxes": {
+              "federal": 185.63,
+              "ca_state": 81.68,
+              "ss": 115.09,
+              "medicare": 26.92,
+              "ca_sdi": 24.13
+            },
+            "net_pay": 1614.46,
+            "employer_taxes": {
+              "ss_er": 115.09,
+              "medicare_er": 26.92,
+              "suta": 24.72,
+              "ett": 0.73,
+              "futa": 4.36
+            },
+            "edited_at": "2026-04-19 19:29"
+          }
+        ],
+        "employee_id": "E-001"
+      },
+      {
+        "id": "annie",
+        "name": "Annie Cheng",
+        "title": "Office Admin",
+        "hourly_rate": 25,
+        "avatar": "AC",
+        "active": true,
+        "periods": [
+          {
+            "pp": 3,
+            "end_date": "2026-02-06",
+            "total_hours": 3.75,
+            "gross_pay": 93.75,
+            "mileage_miles": 0,
+            "mileage_dollars": 0,
+            "reimbursement": 317.53,
+            "gross_plus_reimb": 411.28,
+            "taxes": {
+              "federal": 9.38,
+              "ca_state": 4.13,
+              "ss": 5.81,
+              "medicare": 1.36,
+              "ca_sdi": 1.22
+            },
+            "net_pay": 389.38
+          },
+          {
+            "pp": 4,
+            "end_date": "2026-02-20",
+            "total_hours": 26.2,
+            "gross_pay": 655,
+            "mileage_miles": 0,
+            "mileage_dollars": 0,
+            "reimbursement": 297.21,
+            "gross_plus_reimb": 952.21,
+            "taxes": {
+              "federal": 65.5,
+              "ca_state": 28.82,
+              "ss": 40.61,
+              "medicare": 9.5,
+              "ca_sdi": 8.52
+            },
+            "net_pay": 799.26
+          },
+          {
+            "pp": 5,
+            "end_date": "2026-03-06",
+            "total_hours": 32.83,
+            "gross_pay": 717.5,
+            "mileage_miles": 10,
+            "mileage_dollars": 7.25,
+            "reimbursement": 49.94,
+            "gross_plus_reimb": 774.69,
+            "taxes": {
+              "federal": 71.75,
+              "ca_state": 31.57,
+              "ss": 44.49,
+              "medicare": 10.4,
+              "ca_sdi": 9.33
+            },
+            "net_pay": 607.15
+          },
+          {
+            "pp": 6,
+            "end_date": "2026-03-20",
+            "total_hours": 28.45,
+            "gross_pay": 711.25,
+            "mileage_miles": 1.8,
+            "mileage_dollars": 1.31,
+            "reimbursement": 7.66,
+            "gross_plus_reimb": 720.22,
+            "taxes": {
+              "federal": 71.13,
+              "ca_state": 31.3,
+              "ss": 44.1,
+              "medicare": 10.31,
+              "ca_sdi": 9.25
+            },
+            "net_pay": 554.13
+          },
+          {
+            "pp": 7,
+            "end_date": "2026-04-03",
+            "total_hours": 19.13,
+            "gross_pay": 478.33,
+            "mileage_miles": 1.8,
+            "mileage_dollars": 1.31,
+            "reimbursement": 0,
+            "gross_plus_reimb": 479.64,
+            "taxes": {
+              "federal": 47.83,
+              "ca_state": 21.05,
+              "ss": 29.66,
+              "medicare": 6.94,
+              "ca_sdi": 6.22
+            },
+            "net_pay": 367.94
+          },
+          {
+            "pp": 8,
+            "end_date": "2026-04-17",
+            "total_hours": 25.13,
+            "gross_pay": 628.33,
+            "mileage_miles": 1,
+            "mileage_dollars": 0.73,
+            "reimbursement": 0,
+            "gross_plus_reimb": 629.06,
+            "taxes": {
+              "federal": 62.83,
+              "ca_state": 27.65,
+              "ss": 38.96,
+              "medicare": 9.11,
+              "ca_sdi": 8.17
+            },
+            "net_pay": 482.34
+          }
+        ],
+        "employee_id": "E-002"
+      }
+    ],
+    "draft_period": {
+      "pp": 9,
+      "start": "2026-04-18",
+      "end": "2026-05-01",
+      "pay_date": "2026-05-02",
+      "entries": {
+        "chris": {
+          "time_entries": [
+            {
+              "date": "2026-04-18",
+              "clock_in": "12:30 PM",
+              "clock_out": "4:30 PM",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-18",
+              "clock_in": "10:00 PM",
+              "clock_out": "12:00 AM",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-19",
+              "clock_in": "1:45 PM",
+              "clock_out": "8:45 PM",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-20",
+              "clock_in": "11:00 AM",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-23",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-24",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-25",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-26",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-27",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-28",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-29",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-30",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-05-01",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            }
+          ],
+          "mileage_entries": [
+            {
+              "date": "2026-04-18",
+              "miles": 8.4
+            },
+            {
+              "date": "2026-04-20",
+              "miles": 30.4
+            }
+          ],
+          "reimbursements": [
+            {
+              "date": "2026-04-18",
+              "description": "Postage",
+              "amount": 12.99
+            },
+            {
+              "date": "2026-04-20",
+              "description": "Postage",
+              "amount": 41.6
+            }
+          ]
+        },
+        "annie": {
+          "time_entries": [
+            {
+              "date": "2026-04-18",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-19",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-20",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-21",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-22",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-23",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-24",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-25",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-26",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-27",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-28",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-29",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-04-30",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            },
+            {
+              "date": "2026-05-01",
+              "clock_in": "",
+              "clock_out": "",
+              "notes": ""
+            }
+          ],
+          "mileage_entries": [
+            {
+              "date": "",
+              "miles": 0
+            }
+          ],
+          "reimbursements": [
+            {
+              "date": "",
+              "description": "",
+              "amount": 0
+            }
+          ]
+        }
+      }
+    }
+  }
+}
