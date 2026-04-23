@@ -3922,7 +3922,7 @@ function renderSettings() {
 // Validates only fields that the user filled in (all are optional except display
 // name). Shows a confirm dialog listing exactly which fields changed, then saves
 // and re-renders. On no-op (nothing changed) shows a friendly "nothing to save".
-function saveCompanyInfo() {
+async function saveCompanyInfo() {
   // Read all fields, trimmed
   const name       = document.getElementById("co-name").value.trim();
   const legal_name = document.getElementById("co-legal-name").value.trim();
@@ -4033,11 +4033,43 @@ function saveCompanyInfo() {
   const btn = document.getElementById("co-save-btn");
   if (btn) btn.disabled = true;
 
-  STATE.company = newCompany;
-  saveState(STATE);
+  // [4f-1] In cloud mode, write to Supabase FIRST. Only mutate STATE /
+  // localStorage after the cloud write succeeds, so a failed network call
+  // doesn't leave the UI contradicting the server. In dev mode (file://)
+  // we skip the cloud call and use localStorage only — matches pre-4f
+  // behavior so local testing stays functional.
+  const isDevMode = window.location.protocol === 'file:';
+  try {
+    if (!isDevMode) {
+      const cloudRow = await DAL.saveCompany({
+        name,
+        legal_name,
+        ein: einNormalized,
+        ca_employer_account: ca_acct,
+        street,
+        city,
+        state: stateRaw,
+        zip,
+        phone,
+        email,
+      });
+      // Merge cloud result over our local shape — cloud is source of truth
+      // for the fields it manages, but we preserve legacy address_line1/2
+      // and any other local-only keys the DB doesn't know about.
+      STATE.company = { ...newCompany, ...cloudRow };
+    } else {
+      STATE.company = newCompany;
+    }
+    saveState(STATE);
 
-  alert("Company Info saved.");
-  showView("settings");  // re-render so the form reflects the saved values
+    alert("Company Info saved.");
+    showView("settings");  // re-render so the form reflects the saved values
+  } catch (err) {
+    console.error('[4f-1] saveCompany failed:', err);
+    alert('Could not save Company Info: ' + (err.message || 'unknown error') + '\n\nYour changes were NOT saved. Please try again.');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ============================================================================
