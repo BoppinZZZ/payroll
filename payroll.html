@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Anna Lee, CPA — Payroll</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- [E-8] jsPDF — used by downloadPaystubPdf() to generate paystub PDFs on demand.
+     ~100KB. Loaded from the same CDN as supabase-js for consistency. Exposes
+     window.jspdf.jsPDF once ready. -->
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <!--
   ============================================================================
   Anna Lee, CPA — Payroll App
@@ -45,6 +49,33 @@
     font-size: 16px; -webkit-font-smoothing: antialiased;
   }
   .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+
+  /* ---------- Hydrating overlay (polish: loading state during hydrate) ---------- */
+  /* Full-page curtain shown between sign-in and hydrate-complete. Covers the
+     empty-dashboard flash that used to be visible during cloud fetch. The
+     background matches --bg so transition in/out is seamless. */
+  .hydrating-overlay {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px;
+    z-index: 1000;
+  }
+  .hydrating-spinner {
+    width: 40px; height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: hydrating-spin 0.8s linear infinite;
+  }
+  .hydrating-text {
+    color: var(--muted);
+    font-size: 14px;
+  }
+  @keyframes hydrating-spin {
+    to { transform: rotate(360deg); }
+  }
 
   /* ---------- Sidebar ---------- */
   .sidebar {
@@ -561,6 +592,19 @@
 <body>
 
 <!-- ============================================================
+     HYDRATING OVERLAY (polish: loading state during hydrate)
+     Shown between sign-in confirmation and hydrateAndRender
+     completion so the user doesn't see an empty dashboard flash
+     while cloud data is being fetched. Hidden by default; the
+     auth flow shows it right before hydrate starts and hides it
+     in the finally block when hydrate finishes.
+     ============================================================ -->
+<div id="hydratingOverlay" class="hydrating-overlay" style="display:none">
+  <div class="hydrating-spinner"></div>
+  <div class="hydrating-text">Loading your payroll data…</div>
+</div>
+
+<!-- ============================================================
      LOGIN VIEW (Phase 2 — multi-user auth)
      Shown when no authenticated Supabase session exists.
      Hidden by default; Chunk 4 will add the logic that toggles
@@ -603,15 +647,19 @@
     </div>
 
     <div class="nav-label">Workspace</div>
-    <div class="nav-item active admin-only" data-view="dashboard"><span class="icon">◆</span> Dashboard</div>
-    <div class="nav-item admin-only" data-view="employees"><span class="icon">◆</span> Employees</div>
+    <!-- [E-1] Dashboard, Employees, Run Payroll, History, Tax Rates are now
+         visible to both admins and employees. Employee views are scoped
+         to the logged-in user (see renderEmployeeDashboard etc). Tax Filings
+         and Settings remain admin-only. -->
+    <div class="nav-item active" data-view="dashboard"><span class="icon">◆</span> Dashboard</div>
+    <div class="nav-item" data-view="employees"><span class="icon">◆</span> Employees</div>
     <div class="nav-item" data-view="run-payroll"><span class="icon">◆</span> Run Payroll</div>
     <div class="nav-item" data-view="history"><span class="icon">◆</span> History</div>
     <div class="nav-item admin-only" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
 
     <div class="nav-label">Setup</div>
     <div class="nav-item admin-only" data-view="settings"><span class="icon">◆</span> Settings</div>
-    <div class="nav-item admin-only" data-view="tax-rates"><span class="icon">◆</span> Tax Rates</div>
+    <div class="nav-item" data-view="tax-rates"><span class="icon">◆</span> Tax Rates</div>
 
     <div class="sidebar-footer">
       <div>Current pay period</div>
@@ -755,7 +803,9 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 let currentUserRole = null;   // 'admin' | 'employee' | null (not signed in)
 let currentUserId   = null;   // UUID of signed-in user, or null
 let currentUserName = null;   // full_name from profiles, or null
-const ADMIN_ONLY_VIEWS = ['dashboard', 'employees', 'tax-filings', 'settings', 'tax-rates'];
+// [E-1] Employees now have scoped views for dashboard, employees, tax-rates
+// (see E-2/E-3/E-7). Only tax-filings and settings remain admin-only.
+const ADMIN_ONLY_VIEWS = ['tax-filings', 'settings'];
 
 
 // ============================================================================
@@ -1629,7 +1679,22 @@ function renderCurrentPeriodWidget() {
   `;
 }
 
+// [E-2] Find the employee record linked to the currently signed-in user.
+// Matches profiles.id (= auth.users.id = currentUserId) against the
+// employees.profile_id foreign key. Returns null if no match — which can
+// happen for a fresh employee whose profile hasn't been linked yet.
+function findOwnEmployee() {
+  if (!currentUserId) return null;
+  return STATE.employees.find(e => e.profile_id === currentUserId) || null;
+}
+
 function renderDashboard() {
+  // [E-2] Dispatcher: employees get a scoped dashboard showing only their
+  // own numbers; admins get the full firm-wide view below.
+  if (currentUserRole !== 'admin') {
+    return renderEmployeeDashboard();
+  }
+
   // Compute combined YTD across all employees
   const combinedYtd = STATE.employees.reduce((acc, emp) => {
     const t = ytdTotals(emp.periods);
@@ -1764,7 +1829,125 @@ function renderDashboard() {
   `;
 }
 
+// [E-2] Employee-scoped dashboard. Shows the signed-in employee their own
+// YTD stats, current-period status, and last paystub. NO firm-wide data,
+// NO admin-only buttons (Export/Import/Reset).
+function renderEmployeeDashboard() {
+  const emp = findOwnEmployee();
+
+  // If the auth user isn't yet linked to an employee record, fall back to
+  // the existing "account setup" stub rather than rendering a broken page.
+  if (!emp) return renderNonAdminStub();
+
+  // YTD totals already exclude voided paystubs via ytdTotals -> isPaystubActive.
+  const ytd = ytdTotals(emp.periods);
+  const ytdTaxes = ytd.federal + ytd.ca_state + ytd.ss + ytd.medicare + ytd.ca_sdi;
+
+  // Current-period status pill (reuses the same helper the admin widget uses).
+  const cp = STATE.current_period;
+  const status = cp ? currentPeriodEmployeeStatus(emp) : null;
+  const statusLabel = status === "finalized" ? "Finalized"
+                    : status === "in_progress" ? "In progress"
+                    : "Not started";
+  const statusClass = status === "finalized" ? "finalized"
+                    : status === "in_progress" ? "in-progress"
+                    : "ready";
+
+  const currentPeriodCard = cp ? `
+    <div class="panel" style="padding:18px 20px; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;">
+      <div>
+        <div style="font-weight:600; font-size:15px; color:var(--text);">Current Pay Period — PP${cp.pp}</div>
+        <div style="font-size:13px; color:var(--muted); margin-top:2px;">${formatDate(cp.start)} – ${formatDate(cp.end)} · Pay date ${formatDate(cp.pay_date)}</div>
+      </div>
+      <span class="cpw-emp-status ${statusClass}">${statusLabel}</span>
+    </div>
+  ` : '';
+
+  // Most recent non-voided paystub (sorted descending by pp number so [0] is latest).
+  const activePeriods = emp.periods.filter(isPaystubActive).slice().sort((a, b) => b.pp - a.pp);
+  const lastPeriod = activePeriods[0] || null;
+
+  const lastPaystubCard = lastPeriod ? `
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Last Paystub — PP${lastPeriod.pp}</div>
+          <div class="panel-sub">${lastPeriod.end_date ? "End date: " + formatDate(lastPeriod.end_date) : ""}</div>
+        </div>
+        <span class="badge active">Finalized</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th style="text-align:right">Hours</th>
+            <th style="text-align:right">Gross</th>
+            <th style="text-align:right">Reimb.</th>
+            <th style="text-align:right">Taxes</th>
+            <th style="text-align:right">Net Pay</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="clickable" onclick="viewPaystub('${emp.id}', ${lastPeriod.pp})">
+            <td class="num">${(lastPeriod.total_hours || 0).toFixed(2)}</td>
+            <td class="money">${money(lastPeriod.gross_pay)}</td>
+            <td class="money" style="color:var(--purple);">${money((lastPeriod.reimbursement || 0) + (lastPeriod.mileage_dollars || 0))}</td>
+            <td class="money" style="color:var(--red);">${money(periodTaxes(lastPeriod))}</td>
+            <td class="money" style="color:var(--green);">${money(lastPeriod.net_pay)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  ` : `
+    <div class="panel" style="padding:40px; text-align:center; color:var(--muted);">
+      No paystubs yet for 2026.
+    </div>
+  `;
+
+  // Prefer the employee record's name (payroll-of-record); fall back to
+  // currentUserName (from profiles.full_name) if the record's name is blank.
+  const displayName = emp.name || currentUserName || 'there';
+
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Welcome, ${esc(displayName)}</div>
+        <div class="page-sub">Your payroll dashboard · 2026 tax year</div>
+      </div>
+      <button class="btn primary" onclick="showView('run-payroll')" title="Enter hours for the current pay period">+ Run Payroll</button>
+    </div>
+
+    ${currentPeriodCard}
+
+    <div class="stats-grid">
+      <div class="stat-card blue">
+        <div class="stat-label">YTD Gross Pay</div>
+        <div class="stat-value">${money(ytd.gross)}</div>
+        <div class="stat-sub">${activePeriods.length} paystub${activePeriods.length === 1 ? '' : 's'}</div>
+      </div>
+      <div class="stat-card amber">
+        <div class="stat-label">YTD Taxes Withheld</div>
+        <div class="stat-value">${money(ytdTaxes)}</div>
+        <div class="stat-sub">Fed + CA + FICA + SDI</div>
+      </div>
+      <div class="stat-card green">
+        <div class="stat-label">YTD Net Pay</div>
+        <div class="stat-value">${money(ytd.net)}</div>
+        <div class="stat-sub">Paid to you</div>
+      </div>
+    </div>
+
+    ${lastPaystubCard}
+  `;
+}
+
 function renderEmployees() {
+  // [E-3] Dispatcher: employees see a read-only card with just their own
+  // employee record. No edit/remove/add buttons. Admins get the full
+  // firm-wide table below.
+  if (currentUserRole !== 'admin') {
+    return renderEmployeeOwnRecord();
+  }
+
   // [4f-4 fix] Hide employees who are inactive AND have no pay history.
   // These are the "Remove" cases — treat them as gone from the UI even
   // though we keep the DB row for audit trail / referential safety.
@@ -1828,6 +2011,68 @@ function renderEmployees() {
   `;
 }
 
+// [E-3] Employee-scoped Employees page. Shows a single read-only card with
+// the signed-in user's own record. No edit/remove/add buttons. If the auth
+// user isn't yet linked to an employee record, fall back to the non-admin
+// stub which has a "contact admin" link.
+function renderEmployeeOwnRecord() {
+  const emp = findOwnEmployee();
+  if (!emp) return renderNonAdminStub();
+
+  // YTD totals for the info panel (already excludes voided paystubs).
+  const ytd = ytdTotals(emp.periods);
+  const activeCount = emp.periods.filter(isPaystubActive).length;
+
+  // Avatar — either custom initials/letters or auto-derived from the name.
+  const avatarText = emp.avatar || (emp.name ? emp.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() : '?');
+
+  // Employee ID formatted in monospace so "E-001" reads as an identifier.
+  const empIdDisplay = emp.employee_id
+    ? `<span style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; color: var(--text);">${esc(emp.employee_id)}</span>`
+    : `<span style="color: var(--muted);">—</span>`;
+
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">My Employee Record</div>
+        <div class="page-sub">Read-only · contact your admin to request changes</div>
+      </div>
+    </div>
+
+    <div class="panel" style="padding:28px;">
+      <div style="display:flex; align-items:center; gap:20px; margin-bottom:24px;">
+        <div class="avatar" style="width:72px; height:72px; font-size:24px;">${esc(avatarText)}</div>
+        <div>
+          <div style="font-size:22px; font-weight:600; color:var(--text);">${esc(emp.name || '(name not set)')}</div>
+          <div style="font-size:14px; color:var(--muted); margin-top:2px;">${esc(emp.title || 'No title')}</div>
+        </div>
+        <div style="margin-left:auto;">
+          ${emp.active ? '<span class="badge active">Active</span>' : '<span class="badge pending">Inactive</span>'}
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px;">
+        <div>
+          <div style="font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">Employee ID</div>
+          <div>${empIdDisplay}</div>
+        </div>
+        <div>
+          <div style="font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">Hourly Rate</div>
+          <div style="font-weight:500; color:var(--text);">${money(emp.hourly_rate)}/hr</div>
+        </div>
+        <div>
+          <div style="font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">YTD Gross</div>
+          <div style="font-weight:500; color:var(--text);">${money(ytd.gross)}</div>
+        </div>
+        <div>
+          <div style="font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">Paystubs This Year</div>
+          <div style="font-weight:500; color:var(--text);">${activeCount}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // ============================================================================
 // PHASE 3 CHUNK 3d — NON-ADMIN STUB
 // Minimal placeholder shown to non-admin users on Run Payroll and History
@@ -1848,15 +2093,25 @@ function renderNonAdminStub() {
 }
 
 function renderHistory() {
-  if (currentUserRole !== 'admin') return renderNonAdminStub();
+  // [E-7] Scope the employee list for this render. Admins see every employee's
+  // history (one section each). Employees see ONLY their own section — even
+  // if RLS accidentally returns more rows, we filter defensively in the UI.
+  let historyEmployees;
+  if (currentUserRole === 'admin') {
+    historyEmployees = STATE.employees;
+  } else {
+    const ownEmp = findOwnEmployee();
+    if (!ownEmp) return renderNonAdminStub();
+    historyEmployees = [ownEmp];
+  }
 
-  // Count all voided paystubs across all employees for the toggle button
-  const totalVoided = STATE.employees.reduce(
+  // Count all voided paystubs across the scoped employee list for the toggle button
+  const totalVoided = historyEmployees.reduce(
     (n, emp) => n + emp.periods.filter(p => p.voided).length,
     0
   );
 
-  const sections = STATE.employees.map(emp => {
+  const sections = historyEmployees.map(emp => {
     const t = ytdTotals(emp.periods);  // already excludes voided (Chunk 1)
     const activeCount = emp.periods.filter(isPaystubActive).length;
     const voidedCount = emp.periods.length - activeCount;
@@ -2697,7 +2952,11 @@ function renderPaystub(employeeId, pp) {
       <div style="display:flex; gap:10px;">
         <button class="btn" onclick="showView('history')">← Back to History</button>
         ${actionButtons}
-        <button class="btn primary" onclick="window.print()">Print / Save PDF</button>
+        <!-- [E-6] Download PDF button visible to both admins and employees.
+             Actual generation is wired in E-8 (jsPDF). Until the library
+             is loaded, clicking shows a friendly "loading" alert. -->
+        <button class="btn" onclick="downloadPaystubPdf('${emp.id}', ${p.pp})" title="Download this paystub as a PDF file">Download PDF</button>
+        <button class="btn primary" onclick="window.print()">Print</button>
       </div>
     </div>
 
@@ -3317,15 +3576,18 @@ function currentPeriodEmployeeStatus(emp) {
 
 // Main Run Payroll view renderer — dispatches to picker or single-employee entry
 function renderRunPayroll() {
-  if (currentUserRole !== 'admin') return renderNonAdminStub();
-
-  // [4g-3] Guard against STATE being unhydrated (null current_period). This
-  // happens briefly after page load before hydrateAndRender completes, and
-  // permanently if the account has no seeded pay_periods. getDraft would
-  // crash on STATE.current_period.pp in that case, so we short-circuit to
-  // a friendly placeholder here.
+  // [4g-3] Guard against STATE being unhydrated (null current_period).
   if (!STATE.current_period) {
     return `<div class="empty" style="padding:32px; text-align:center;">Loading pay period data…</div>`;
+  }
+
+  // [E-4] Employee mode: skip the picker and render the logged-in user's
+  // own entry form directly. Draft mutators + syncDraftToCloud already scope
+  // to the employee_id passed in, so the existing machinery works as-is.
+  if (currentUserRole !== 'admin') {
+    const ownEmp = findOwnEmployee();
+    if (!ownEmp) return renderNonAdminStub();
+    return renderRunPayrollEntry(ownEmp.id);
   }
 
   if (runPayrollSelectedEmp) {
@@ -3437,18 +3699,34 @@ function renderRunPayrollEntry(empId) {
     </tr>`).join("");
 
   // "Next Employee" navigation — skip to the next active employee in the list.
+  // [E-4] Only meaningful for admins (they iterate through employees). Employees
+  // only have themselves on this page, so we hide the header and button entirely.
+  const isAdminView = currentUserRole === 'admin';
   const activeEmps = STATE.employees.filter(e => e.active);
   const currentIdx = activeEmps.findIndex(e => e.id === empId);
-  const nextEmp = currentIdx >= 0 ? activeEmps[currentIdx + 1] : null;
+  const nextEmp = isAdminView && currentIdx >= 0 ? activeEmps[currentIdx + 1] : null;
   const nextBtn = nextEmp
     ? `<button class="btn" onclick="goToNextRunPayrollEmployee()" title="Go to ${esc(nextEmp.name)}">Next Employee (${esc(nextEmp.name)}) →</button>`
     : "";
 
-  return `
+  // [E-4] The entry-header row (with the "← Back to employees" breadcrumb and
+  // "Next Employee" button) is admin-only. Employees land here directly and
+  // have nowhere to go back to, so we omit the whole strip.
+  const entryHeader = isAdminView ? `
     <div class="rpp-entry-header">
       <button class="rpp-breadcrumb" onclick="backToRunPayrollPicker()" title="Return to the list of employees">← Back to employees</button>
       <div class="rpp-entry-nav">${nextBtn}</div>
     </div>
+  ` : '';
+
+  // [E-4] Clear-draft tooltip differs by role — admin clears every employee's
+  // draft; employee only has their own to clear.
+  const clearTooltip = isAdminView
+    ? "Clear all entered data for this pay period (all employees)"
+    : "Clear your entered data for this pay period";
+
+  return `
+    ${entryHeader}
 
     <div class="page-header">
       <div>
@@ -3456,7 +3734,7 @@ function renderRunPayrollEntry(empId) {
         <div class="page-sub">${formatDate(cp.start)} – ${formatDate(cp.end)} · Pay date ${formatDate(cp.pay_date)}</div>
       </div>
       <div style="display:flex; gap:10px;">
-        <button class="btn" onclick="resetDraft()" title="Clear all entered data for this pay period (all employees)">Clear draft</button>
+        <button class="btn" onclick="resetDraft()" title="${clearTooltip}">Clear draft</button>
       </div>
     </div>
 
@@ -3988,11 +4266,27 @@ async function finalizePP(employeeId) {
   // current pay_periods row and opens the next. If that step fails, the
   // paystub we just saved is still safe — we surface the error and leave
   // STATE.current_period alone so the user can retry after a refresh.
+  //
+  // [E-5] Rollover is an ADMIN-ONLY action — it closes the pay period for
+  // everyone. When an employee finalizes their own paystub we show a
+  // friendly "saved, admin will close the period" message and skip the
+  // rollover entirely. An admin will close the period the next time they
+  // log in and finalize.
   const justFinalizedPP = period.pp;
   const justFinalizedName = emp.name;
   const justFinalizedNet = period.net_pay;
   let rolledOver = false;  // Tracks whether the period just advanced — used below to route to deposit summary.
-  if (allEmployeesFinalizedForCurrentPP()) {
+  const isAdminActor = currentUserRole === 'admin';
+
+  if (!isAdminActor) {
+    // Employee path — save only, never roll over. Also skip the deposit
+    // summary routing below (that's admin-facing).
+    alert(
+      `PP${justFinalizedPP} finalized for ${justFinalizedName}.\n` +
+      `Net pay: ${money(justFinalizedNet)}\n\n` +
+      `Your paystub has been saved. Your admin will close the pay period.`
+    );
+  } else if (allEmployeesFinalizedForCurrentPP()) {
     try {
       const next = await rolloverToNextPeriod();
       rolledOver = true;
@@ -5042,6 +5336,203 @@ async function submitEditPaystub() {
 // allEmployeesFinalizedForCurrentPP) all skip it. Restore clears `voided`
 // and deletes `voided_at`. Both are fully reversible — no data is lost.
 // ============================================================================
+
+// [E-8] Download the specified paystub as a one-page PDF using jsPDF (loaded
+// from CDN via <script> tag in <head>). Renders a clean layout: company
+// header, employee info, earnings, reimbursements (if any), deductions,
+// net pay box, and a voided notice when applicable. Filename is
+// "paystub-<name-slug>-pp<N>-<YYYY-MM-DD>.pdf".
+function downloadPaystubPdf(employeeId, pp) {
+  // Guard: jsPDF loads async from CDN. If the user clicks before it's ready,
+  // show a friendly message and ask them to try again.
+  if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
+    alert("PDF generator is still loading — please try again in a moment.");
+    return;
+  }
+
+  const emp = STATE.employees.find(e => e.id === employeeId);
+  if (!emp) { alert("Employee not found"); return; }
+  const p = emp.periods.find(x => x.pp === pp);
+  if (!p) { alert("Pay period not found"); return; }
+
+  const company = STATE.company || {};
+  const ytd = ytdThroughPeriod(emp, pp);
+  const pStart = periodStart(p.end_date);
+  const payDateObj = new Date(p.end_date + "T00:00:00");
+  payDateObj.setDate(payDateObj.getDate() + 1);
+  const payDate = payDateObj.toISOString().slice(0, 10);
+
+  const reimbTotal = (p.reimbursement || 0) + (p.mileage_dollars || 0);
+  const taxes = periodTaxes(p);
+  const ytdTaxes = ytd.federal + ytd.ca_state + ytd.ss + ytd.medicare + ytd.ca_sdi;
+
+  // ---- jsPDF setup ----
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+
+  // Page dimensions (letter portrait): 612 x 792 pt. 40pt margins.
+  const PAGE_W = 612;
+  const MARGIN = 40;
+  const CONTENT_W = PAGE_W - 2 * MARGIN;
+  let y = MARGIN + 4;
+
+  // Column x-positions used by the table helpers below. First col is
+  // LEFT-aligned at C1; cols 2-5 are RIGHT-aligned at C2..C5.
+  const C1 = MARGIN;
+  const C2 = MARGIN + 310;
+  const C3 = MARGIN + 395;
+  const C4 = MARGIN + 470;
+  const C5 = PAGE_W - MARGIN;
+
+  // Simple currency formatter (jsPDF prints strings — we build them here).
+  const fmtMoney = n => '$' + (Number(n) || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const fmtDate  = iso => {
+    if (!iso) return '';
+    const d = new Date(iso + 'T00:00:00');
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+
+  // Draw a row using 5 column positions: [label, rate, qty/hours, current, ytd].
+  // Missing cells can pass '' to blank them. Right-aligns cols 2-5.
+  const drawRow = (cells, opts = {}) => {
+    doc.setFont('helvetica', opts.bold ? 'bold' : 'normal');
+    doc.setFontSize(opts.size || 10);
+    doc.setTextColor(opts.color || 30);
+    doc.text(String(cells[0] || ''), C1, y);
+    if (cells[1] != null) doc.text(String(cells[1]), C2, y, { align: 'right' });
+    if (cells[2] != null) doc.text(String(cells[2]), C3, y, { align: 'right' });
+    if (cells[3] != null) doc.text(String(cells[3]), C4, y, { align: 'right' });
+    if (cells[4] != null) doc.text(String(cells[4]), C5, y, { align: 'right' });
+    y += 14;
+  };
+
+  // Draw a section header (bold blue label with thin underline).
+  const section = label => {
+    y += 6;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(30, 64, 175);
+    doc.text(label, C1, y);
+    y += 5;
+    doc.setDrawColor(30, 64, 175);
+    doc.setLineWidth(1);
+    doc.line(C1, y, C5, y);
+    doc.setDrawColor(200);
+    y += 14;
+  };
+
+  // ---- Company header ----
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(30, 64, 175);
+  doc.text(company.name || 'Company', C1, y);
+  y += 18;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(100);
+  const addrParts = [company.street, [company.city, company.state, company.zip].filter(Boolean).join(', ')].filter(Boolean);
+  if (addrParts.length) { doc.text(addrParts.join(' · '), C1, y); y += 11; }
+  const contactParts = [company.phone, company.email].filter(Boolean);
+  if (contactParts.length) { doc.text(contactParts.join(' · '), C1, y); y += 11; }
+  if (company.ein) { doc.text('EIN: ' + company.ein, C1, y); y += 11; }
+
+  y += 4;
+  doc.setDrawColor(200);
+  doc.setLineWidth(0.5);
+  doc.line(C1, y, C5, y);
+  y += 18;
+
+  // ---- PAYSTUB title ----
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(30);
+  doc.text('Paystub', C1, y);
+  y += 18;
+
+  // ---- Employee + period info (two side-by-side rows) ----
+  doc.setFontSize(10);
+  const labelX = C1;
+  const valueX = C1 + 80;
+  const labelX2 = C1 + 260;
+  const valueX2 = labelX2 + 80;
+
+  doc.setFont('helvetica', 'bold');   doc.text('Employee:', labelX, y);
+  doc.setFont('helvetica', 'normal'); doc.text(emp.name || '—', valueX, y);
+  doc.setFont('helvetica', 'bold');   doc.text('Pay Period:', labelX2, y);
+  doc.setFont('helvetica', 'normal'); doc.text(`PP${p.pp} (${fmtDate(pStart)} – ${fmtDate(p.end_date)})`, valueX2, y);
+  y += 14;
+
+  doc.setFont('helvetica', 'bold');   doc.text('Employee ID:', labelX, y);
+  doc.setFont('helvetica', 'normal'); doc.text(emp.employee_id || '—', valueX, y);
+  doc.setFont('helvetica', 'bold');   doc.text('Pay Date:', labelX2, y);
+  doc.setFont('helvetica', 'normal'); doc.text(fmtDate(payDate), valueX2, y);
+  y += 10;
+
+  // ---- EARNINGS ----
+  section('Earnings');
+  drawRow(['Description', 'Rate', 'Hours', 'Current', 'YTD'], { bold: true, size: 9, color: 100 });
+  drawRow(['Regular Pay', fmtMoney(emp.hourly_rate), (p.total_hours || 0).toFixed(2), fmtMoney(p.gross_pay), fmtMoney(ytd.gross)]);
+  y += 2;
+  drawRow(['Gross Pay', '—', (p.total_hours || 0).toFixed(2), fmtMoney(p.gross_pay), fmtMoney(ytd.gross)], { bold: true });
+
+  // ---- REIMBURSEMENTS (only if any) ----
+  if (reimbTotal > 0) {
+    section('Reimbursements (Non-Taxable)');
+    drawRow(['Description', 'Rate', 'Qty', 'Current', 'YTD'], { bold: true, size: 9, color: 100 });
+    if (p.mileage_dollars > 0) {
+      drawRow(['Mileage', fmtMoney(STATE.mileage_rate), (p.mileage_miles || 0).toFixed(2) + ' mi', fmtMoney(p.mileage_dollars), '—']);
+    }
+    if (p.reimbursement > 0) {
+      drawRow(['Expense reimbursement', '—', '—', fmtMoney(p.reimbursement), '—']);
+    }
+    y += 2;
+    drawRow(['Total Reimbursements', '', '', fmtMoney(reimbTotal), fmtMoney(ytd.reimb)], { bold: true });
+  }
+
+  // ---- DEDUCTIONS ----
+  section('Taxes Withheld');
+  drawRow(['Tax', 'Rate', '', 'Current', 'YTD'], { bold: true, size: 9, color: 100 });
+  const rates = STATE.tax_rates || {};
+  const fmtPct = r => ((r || 0) * 100).toFixed(2) + '%';
+  drawRow(['Federal Income Tax',  fmtPct(rates.fed_flat),    '', fmtMoney(p.taxes.federal),  fmtMoney(ytd.federal)]);
+  drawRow(['CA State Income Tax', fmtPct(rates.ca_flat),     '', fmtMoney(p.taxes.ca_state), fmtMoney(ytd.ca_state)]);
+  drawRow(['Social Security',     fmtPct(rates.ss_ee),       '', fmtMoney(p.taxes.ss),       fmtMoney(ytd.ss)]);
+  drawRow(['Medicare',            fmtPct(rates.medicare_ee), '', fmtMoney(p.taxes.medicare), fmtMoney(ytd.medicare)]);
+  drawRow(['CA SDI',              fmtPct(rates.ca_sdi),      '', fmtMoney(p.taxes.ca_sdi),   fmtMoney(ytd.ca_sdi)]);
+  y += 2;
+  drawRow(['Total Taxes', '', '', fmtMoney(taxes), fmtMoney(ytdTaxes)], { bold: true });
+
+  // ---- NET PAY box ----
+  y += 18;
+  doc.setFillColor(209, 250, 229);   // --green-soft from CSS
+  doc.rect(C1, y - 14, CONTENT_W, 36, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(12);
+  doc.setTextColor(4, 120, 87);      // --green
+  doc.text('NET PAY', C1 + 12, y + 6);
+  doc.setFontSize(18);
+  doc.text(fmtMoney(p.net_pay), C5 - 12, y + 9, { align: 'right' });
+  y += 38;
+
+  // ---- Voided notice (if applicable) ----
+  if (p.voided) {
+    y += 16;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(185, 28, 28);
+    doc.text('VOIDED', C1, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100);
+    doc.text('This paystub was voided on ' + (p.voided_at || 'unknown date'), C1 + 60, y);
+  }
+
+  // ---- Download ----
+  const empSlug = (emp.name || 'employee').replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase().replace(/^-|-$/g, '');
+  const filename = `paystub-${empSlug}-pp${p.pp}-${p.end_date}.pdf`;
+  doc.save(filename);
+}
 
 async function voidPaystub(employeeId, pp) {
   if (!requireAdmin('Void Paystub')) return;
@@ -7515,6 +8006,12 @@ async function hydrateAndRender() {
     }
   } catch (err) {
     console.warn('[hydrate] Failed to hydrate from Supabase:', err);
+  } finally {
+    // [Polish] Always hide the loading overlay when hydrate finishes — success
+    // OR failure. On failure the user lands on whatever STATE had before (likely
+    // EMPTY_STATE → empty dashboard), but at least they aren't stuck looking
+    // at "Loading your payroll data…" forever.
+    hideHydratingOverlay();
   }
 }
 
@@ -7528,6 +8025,18 @@ function showAppView() {
 function showLoginView() {
   document.querySelector('.app').style.display = 'none';
   document.getElementById('loginView').style.display = '';  // revert to CSS default (flex)
+}
+
+// [Polish] Toggle helpers for the hydrating overlay — covers the empty
+// dashboard flash between sign-in and hydrate completion. Safe to call
+// multiple times; CSS keeps the state idempotent.
+function showHydratingOverlay() {
+  const el = document.getElementById('hydratingOverlay');
+  if (el) el.style.display = '';  // revert to CSS default (flex via class)
+}
+function hideHydratingOverlay() {
+  const el = document.getElementById('hydratingOverlay');
+  if (el) el.style.display = 'none';
 }
 
 
@@ -7795,6 +8304,10 @@ async function initAuth() {
 
   const { data: { session } } = await supabaseClient.auth.getSession();
   if (session) {
+    // [Polish] Show the loading overlay BEFORE flipping .app visible so the
+    // user never sees the empty pre-hydrate dashboard. hydrateAndRender
+    // hides the overlay when it finishes (success or failure).
+    showHydratingOverlay();
     showAppView();
     hydrateAndRender();                          // [4e-1c] cloud data replaces localStorage STATE
   } else {
@@ -7805,6 +8318,9 @@ async function initAuth() {
   // Lets the view swap automatically after a magic-link redirect or sign-out.
   supabaseClient.auth.onAuthStateChange((event, session) => {
     if (session) {
+      // [Polish] Same overlay pattern for magic-link sign-in flow: cover
+      // the dashboard until hydrate completes.
+      if (event === 'SIGNED_IN') showHydratingOverlay();
       showAppView();
       // [4e-1c] Only rehydrate on actual sign-in events — skip INITIAL_SESSION
       // (already handled by the getSession branch above) and TOKEN_REFRESHED
