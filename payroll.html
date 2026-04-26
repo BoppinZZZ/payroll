@@ -9,6 +9,12 @@
      ~100KB. Loaded from the same CDN as supabase-js for consistency. Exposes
      window.jspdf.jsPDF once ready. -->
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<!-- [R-2] IBM Plex font family — Serif for headings, Sans for body/UI, Mono
+     for tax IDs and other identifiers. Loaded from Google Fonts with preconnect
+     hints so the FOUT (flash of unstyled text) is minimized. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
 <!--
   ============================================================================
   Anna Lee, CPA — Payroll App
@@ -66,11 +72,15 @@
     --purple: #7C3AED;
     --purple-soft: #EDE9FE;
   }
+  /* [R-2] Body uses IBM Plex Sans throughout. Headings (page-title,
+     panel-title) override to Plex Serif. Money/numeric cells get tabular
+     figures via font-variant-numeric so columns align to the pixel. */
   html, body {
     height: 100%;
     background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     font-size: 16px; -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'kern' 1, 'liga' 1;
   }
   .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
 
@@ -128,7 +138,9 @@
   /* ---------- Main ---------- */
   .main { padding: 32px 40px; overflow-y: auto; }
   .page-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 24px; gap: 20px; flex-wrap: wrap; }
-  .page-title { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+  /* [R-2] Page titles use Plex Serif at weight 500 (heavier than typical
+     serifs at this weight — gives gravitas without being bold). */
+  .page-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 28px; font-weight: 500; letter-spacing: -0.01em; }
   .page-sub { color: var(--muted); font-size: 14px; margin-top: 4px; }
 
   .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--border); background: white; color: var(--text); font-size: 14px; font-weight: 500; cursor: pointer; transition: all .15s ease; font-family: inherit; white-space: nowrap; }
@@ -145,7 +157,7 @@
   .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
   .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
   .stat-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
-  .stat-value { font-size: 26px; font-weight: 700; margin-top: 8px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .stat-value { font-size: 28px; font-weight: 500; margin-top: 8px; font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
   .stat-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
   .stat-card.green .stat-value { color: var(--green); }
   .stat-card.blue .stat-value { color: var(--primary); }
@@ -155,7 +167,7 @@
   /* ---------- Panel ---------- */
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }
   .panel-header { padding: 18px 22px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  .panel-title { font-size: 16px; font-weight: 600; }
+  .panel-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 17px; font-weight: 500; letter-spacing: -0.005em; }
   .panel-sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
   .panel-body { padding: 22px; }
 
@@ -166,8 +178,10 @@
   tr:last-child td { border-bottom: none; }
   tr.clickable { cursor: pointer; transition: background 0.1s; }
   tr.clickable:hover td { background: #fafbfd; }
-  td.num { text-align: right; font-weight: 500; }
-  td.money { text-align: right; font-weight: 600; }
+  /* [R-2] Tabular numerals so digits in stacked rows line up to the pixel.
+     Plex Sans includes proper tabular figures via font-feature-settings. */
+  td.num   { text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
+  td.money { text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
   .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; }
   .badge.active { background: var(--green-soft); color: var(--green); }
   .badge.pending { background: var(--amber-soft); color: var(--amber); }
@@ -181,7 +195,7 @@
   .paystub { max-width: 780px; margin: 0 auto; background: white; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   /* [R-1] Solid teal paystub header (gradient removed). */
   .paystub-header { background: var(--primary); color: white; padding: 28px 32px; display: flex; justify-content: space-between; align-items: flex-start; }
-  .paystub-co { font-size: 20px; font-weight: 700; }
+  .paystub-co { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 22px; font-weight: 500; letter-spacing: -0.005em; }
   .paystub-co-sub { font-size: 13px; opacity: .85; margin-top: 2px; }
   .paystub-meta { text-align: right; font-size: 13px; }
   .paystub-meta strong { display: block; font-size: 15px; margin-top: 2px; }
@@ -309,7 +323,7 @@
   .emp-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15, 23, 42, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
   .emp-modal-content { background: white; border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25); width: 100%; max-width: 440px; max-height: 90vh; overflow-y: auto; }
   .emp-modal-header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-  .emp-modal-title { font-size: 18px; font-weight: 700; color: var(--text); }
+  .emp-modal-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 20px; font-weight: 500; color: var(--text); letter-spacing: -0.005em; }
   .emp-modal-close { background: none; border: none; font-size: 24px; color: var(--muted); cursor: pointer; line-height: 1; padding: 0 4px; }
   .emp-modal-close:hover { color: var(--text); }
   .emp-modal-body { padding: 20px 24px; }
@@ -346,7 +360,7 @@
   /* ---------- Current Period Widget (Dashboard) ---------- */
   .cpw { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; display: flex; flex-direction: column; gap: 14px; }
   .cpw-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-  .cpw-title { font-size: 17px; font-weight: 700; color: var(--text); }
+  .cpw-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 18px; font-weight: 500; color: var(--text); letter-spacing: -0.005em; }
   .cpw-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
   .cpw-countdown { font-size: 13px; color: var(--text); font-weight: 500; }
   .cpw-countdown.urgent { color: var(--amber); }
@@ -401,7 +415,7 @@
   /* Tax ID strip (Chunk 5): shows EIN / CA Employer Account # just under the section header */
   .tf-tax-id-strip { display: flex; align-items: baseline; gap: 10px; background: #f8fafc; border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-top: 10px; margin-bottom: 4px; }
   .tf-tax-id-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-size: 10px; }
-  .tf-tax-id-value { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; color: var(--text); }
+  .tf-tax-id-value { font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; font-weight: 500; color: var(--text); }
   .tf-tax-id-value-missing { font-size: 12px; color: var(--muted); font-style: italic; }
   .tf-form-line { display: grid; grid-template-columns: 56px 1fr auto; gap: 16px; align-items: baseline; padding: 14px 0; border-bottom: 1px solid var(--border); }
   .tf-form-line:last-child { border-bottom: none; }
@@ -1996,7 +2010,7 @@ function renderEmployees() {
     // Employee ID cell — monospace so it reads as a structured identifier.
     // Falls back to em-dash if somehow missing (migration should prevent this).
     const empIdCell = emp.employee_id
-      ? `<span style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; color: var(--text);">${esc(emp.employee_id)}</span>`
+      ? `<span style="font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; color: var(--text);">${esc(emp.employee_id)}</span>`
       : `<span style="color: var(--muted);">—</span>`;
     return `
       <tr>
@@ -2057,7 +2071,7 @@ function renderEmployeeOwnRecord() {
 
   // Employee ID formatted in monospace so "E-001" reads as an identifier.
   const empIdDisplay = emp.employee_id
-    ? `<span style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; color: var(--text);">${esc(emp.employee_id)}</span>`
+    ? `<span style="font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; color: var(--text);">${esc(emp.employee_id)}</span>`
     : `<span style="color: var(--muted);">—</span>`;
 
   return `
