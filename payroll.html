@@ -828,6 +828,8 @@
     <div class="nav-item admin-only" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
     <!-- [WG-3] Year-End: hosts W-2 forms and annual totals. Admin-only. -->
     <div class="nav-item admin-only" data-view="year-end"><span class="icon">◆</span> Year-End</div>
+    <!-- [AL-3] Activity Log: admin audit trail for paystub finalizes/edits/voids. -->
+    <div class="nav-item admin-only" data-view="activity-log"><span class="icon">◆</span> Activity Log</div>
 
     <div class="nav-label">Setup</div>
     <div class="nav-item admin-only" data-view="settings"><span class="icon">◆</span> Settings</div>
@@ -998,8 +1000,8 @@ let currentUserRole = null;   // 'admin' | 'employee' | null (not signed in)
 let currentUserId   = null;   // UUID of signed-in user, or null
 let currentUserName = null;   // full_name from profiles, or null
 // [E-1] Employees now have scoped views for dashboard, employees, tax-rates
-// (see E-2/E-3/E-7). Tax-filings, settings, and year-end stay admin-only.
-const ADMIN_ONLY_VIEWS = ['tax-filings', 'settings', 'year-end'];
+// (see E-2/E-3/E-7). Tax-filings, settings, year-end, activity-log stay admin-only.
+const ADMIN_ONLY_VIEWS = ['tax-filings', 'settings', 'year-end', 'activity-log'];
 
 
 // ============================================================================
@@ -1127,6 +1129,7 @@ const EMPTY_STATE = {
   pay_frequency: 'bi-weekly',
   current_period: null,
   employees: [],
+  profiles_by_id: {},   // [AL-1] populated on hydrate; empty pre-hydrate
 };
 
 // Load state from localStorage (dev mode only) or return an empty shape
@@ -1290,6 +1293,7 @@ let currentPaystubContext = null;  // { employeeId, pp } when viewing a paystub
 let runPayrollSelectedEmp = null;  // employee id currently being edited in Run Payroll; null = picker view
 let taxFilingsSelection = null;    // { year, quarter } selected on Tax Filings page; null = default to current quarter
 let yearEndSelection = null;       // [WG-3] { year } selected on Year-End page; null = default to most recent year with data
+let activityLogFilter = { employeeId: 'all', eventType: 'all' };  // [AL-3] Activity Log filters
 
 // ============================================================================
 // 3. UTILITY FUNCTIONS
@@ -1506,6 +1510,102 @@ function yearEndTotals(emp, year) {
   const ssCap = (STATE.tax_rates && STATE.tax_rates.ss_wage_base) || Infinity;
   totals.box3_ss_wages = Math.min(totals.box1_wages, ssCap);
   return totals;
+}
+
+// --------------------------------------------------------------------------
+// [AL-2] Activity Log helpers
+// --------------------------------------------------------------------------
+
+// Resolve an actor UUID to a display name from the cached profile lookup.
+// Returns "(unknown user)" if the UUID isn't in the cache (account deleted,
+// pre-RLS-fix paystub, or non-admin viewing without profile read access).
+function resolveActorName(uuid) {
+  if (!uuid) return '(system)';
+  const lookup = STATE.profiles_by_id || {};
+  const profile = lookup[uuid];
+  if (!profile) return '(unknown user)';
+  return profile.full_name || '(unnamed user)';
+}
+
+// Build a chronological list of admin/employee actions across all paystubs.
+// Each event represents one of: finalize, edit, void. Voided AND edited
+// paystubs emit two events (the audit story is "Annie's PP3 was edited
+// on Feb 25, then voided on Feb 28").
+//
+// Returns an array of { timestamp, eventType, actorId, actorName,
+// employeeId, employeeName, pp, paystubId, details }, sorted newest first.
+function buildActivityLog() {
+  const events = [];
+
+  for (const emp of (STATE.employees || [])) {
+    for (const p of (emp.periods || [])) {
+      // Finalize event — every paystub has one (when finalized_at is set).
+      // Older seed paystubs may lack this field; we still skip silently.
+      if (p.finalized_at) {
+        events.push({
+          timestamp:    p.finalized_at,
+          eventType:    'finalized',
+          actorId:      p.finalized_by || null,
+          actorName:    resolveActorName(p.finalized_by),
+          employeeId:   emp.id,
+          employeeName: emp.name,
+          pp:           p.pp,
+          paystubId:    p.paystub_id || null,
+          details:      `Net pay ${money(p.net_pay || 0)}`,
+        });
+      }
+
+      // Edit event — only if last_edited_at is set. We only have the LATEST
+      // edit (the schema doesn't store full edit history); edit_count tells
+      // us how many total edits happened.
+      if (p.edited_at) {
+        const editCount = p.edit_count || 1;
+        events.push({
+          timestamp:    p.edited_at,
+          eventType:    'edited',
+          actorId:      p.last_edited_by || null,
+          actorName:    resolveActorName(p.last_edited_by),
+          employeeId:   emp.id,
+          employeeName: emp.name,
+          pp:           p.pp,
+          paystubId:    p.paystub_id || null,
+          details:      editCount > 1 ? `${editCount} total edits` : 'first edit',
+        });
+      }
+
+      // Void event — only if voided. Restore events aren't tracked in the
+      // schema (restore clears voided fields rather than logging), so we
+      // can't surface them. That's a known v1 limitation.
+      if (p.voided && p.voided_at) {
+        events.push({
+          timestamp:    p.voided_at,
+          eventType:    'voided',
+          actorId:      p.voided_by || null,
+          actorName:    resolveActorName(p.voided_by),
+          employeeId:   emp.id,
+          employeeName: emp.name,
+          pp:           p.pp,
+          paystubId:    p.paystub_id || null,
+          details:      p.voided_reason || '',
+        });
+      }
+    }
+  }
+
+  // Sort newest first. ISO timestamps sort lexically, so a string compare works.
+  events.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+  return events;
+}
+
+// Format an ISO timestamp as "Apr 25, 2026 · 3:42 PM" — readable for an
+// activity feed without sacrificing precision.
+function formatActivityTimestamp(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;  // unparsable; show raw
+  const datePart = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return `${datePart} · ${timePart}`;
 }
 
 // Sum of this employee's gross pay from ACTIVE paystubs with a lower pp AND
@@ -4912,6 +5012,118 @@ function renderYearEnd() {
 }
 
 // ============================================================================
+// [AL-3] ACTIVITY LOG — admin audit trail of paystub finalizes/edits/voids
+// ----------------------------------------------------------------------------
+// Surfaces audit fields that already exist on every paystub (finalized_at,
+// last_edited_at, voided_at + the *_by UUID columns) but were never visible
+// in the UI. Useful for answering "who changed Annie's PP3 paystub?" and
+// for compliance audits.
+//
+// Limitations:
+//   - We only have the LATEST edit per paystub (schema doesn't store full
+//     edit history). edit_count tells you how many edits happened total.
+//   - Restore actions don't appear in the log — restoring clears voided_at
+//     rather than emitting a separate event. Unlikely to matter in practice.
+// ============================================================================
+
+function setActivityFilter(key, value) {
+  activityLogFilter = { ...activityLogFilter, [key]: value };
+  showView('activity-log');
+}
+
+function renderActivityLog() {
+  if (currentUserRole !== 'admin') return renderNonAdminStub();
+
+  const allEvents = buildActivityLog();
+
+  // Apply filters
+  const filtered = allEvents.filter(e => {
+    if (activityLogFilter.employeeId !== 'all' && e.employeeId !== activityLogFilter.employeeId) return false;
+    if (activityLogFilter.eventType  !== 'all' && e.eventType  !== activityLogFilter.eventType)  return false;
+    return true;
+  });
+
+  // Filter dropdown options
+  const empOptions = ['<option value="all">All employees</option>']
+    .concat(STATE.employees.map(emp =>
+      `<option value="${emp.id}" ${activityLogFilter.employeeId === emp.id ? 'selected' : ''}>${esc(emp.name)}</option>`
+    )).join('');
+  const typeOptions = [
+    ['all',       'All actions'],
+    ['finalized', 'Finalized'],
+    ['edited',    'Edited'],
+    ['voided',    'Voided'],
+  ].map(([v, label]) =>
+    `<option value="${v}" ${activityLogFilter.eventType === v ? 'selected' : ''}>${label}</option>`
+  ).join('');
+
+  // Per-event row rendering
+  const eventBadge = type => {
+    if (type === 'finalized') return `<span class="badge active">Finalized</span>`;
+    if (type === 'edited')    return `<span class="badge pending">Edited</span>`;
+    if (type === 'voided')    return `<span class="badge" style="background:var(--red-soft); color:var(--red);">Voided</span>`;
+    return `<span class="badge">${esc(type)}</span>`;
+  };
+
+  const rows = filtered.map(e => `
+    <tr class="clickable" onclick="viewPaystub('${e.employeeId}', ${e.pp})">
+      <td style="white-space:nowrap;">${esc(formatActivityTimestamp(e.timestamp))}</td>
+      <td>${eventBadge(e.eventType)}</td>
+      <td>${esc(e.employeeName)}</td>
+      <td>PP${e.pp}</td>
+      <td>${esc(e.actorName)}</td>
+      <td style="color:var(--muted); font-size:13px;">${esc(e.details || '')}</td>
+    </tr>
+  `).join('');
+
+  const emptyState = `
+    <tr><td colspan="6" class="empty">
+      ${allEvents.length === 0
+        ? 'No activity yet. Finalized paystubs and edits will appear here.'
+        : 'No events match the selected filters.'}
+    </td></tr>
+  `;
+
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Activity Log</div>
+        <div class="page-sub">Audit trail of paystub finalizes, edits, and voids · ${allEvents.length} total events</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <select class="quarter-select" onchange="setActivityFilter('employeeId', this.value)">
+          ${empOptions}
+        </select>
+        <select class="quarter-select" style="min-width:160px;" onchange="setActivityFilter('eventType', this.value)">
+          ${typeOptions}
+        </select>
+      </div>
+    </div>
+
+    <div class="notice info">
+      <span>ℹ</span>
+      <div>Click any row to open the related paystub. Voided paystubs still appear in the log even if you've toggled "Show voided" off on History.</div>
+    </div>
+
+    <div class="panel">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:170px;">When</th>
+            <th style="width:110px;">Action</th>
+            <th>Employee</th>
+            <th style="width:80px;">Period</th>
+            <th>By</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>${rows || emptyState}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ============================================================================
 // 4d. SETTINGS — Company Info editor (Chunk 2: page shell only)
 // ----------------------------------------------------------------------------
 // Additive: a new Settings page accessible from the left sidebar. This chunk
@@ -5290,6 +5502,7 @@ function showView(viewName) {
   else if (viewName === "run-payroll") html = renderRunPayroll();
   else if (viewName === "tax-filings") html = renderTaxFilings();
   else if (viewName === "year-end") html = renderYearEnd();
+  else if (viewName === "activity-log") html = renderActivityLog();
   else if (viewName === "settings") html = renderSettings();
   else if (viewName === "tax-rates") html = renderTaxRates();
   else html = `<div class="empty">Unknown view</div>`;
@@ -7130,6 +7343,24 @@ const DAL = {
     return data || [];
   },
 
+  // ---- [AL-1] -------------------------------------------------------------
+  // Fetch all profile rows so the Activity Log can resolve actor UUIDs
+  // (voided_by / last_edited_by / finalized_by) to display names.
+  // RLS: requires the profiles_admin_select_all policy added in
+  // admin-read-profiles.sql; non-admins will get an empty array (RLS-filtered)
+  // which is fine — they don't see the Activity Log anyway.
+  async getProfiles() {
+    const { data, error } = await supabaseClient
+      .from('profiles')
+      .select('id, full_name, role');
+
+    if (error) {
+      console.warn('DAL.getProfiles error (non-fatal — Activity Log will show UUIDs):', error);
+      return [];
+    }
+    return data || [];
+  },
+
 
   // ---- 4d-3a ---------------------------------------------------------------
   // Fetch pay periods the current user is allowed to see.
@@ -7302,12 +7533,14 @@ const DAL = {
   //   raw.payPeriods.length   // -> 9
   //   raw.paystubs.length     // -> 14
   async loadAll({ year = new Date().getFullYear() } = {}) {
-    const [company, taxRates, employees, payPeriods, paystubs] = await Promise.all([
+    // [AL-1] profiles fetched in parallel for actor-name resolution in Activity Log.
+    const [company, taxRates, employees, payPeriods, paystubs, profiles] = await Promise.all([
       this.getCompany(),
       this.getTaxRates(year),
       this.getEmployees(),
       this.getPayPeriods({ year }),
       this.getPaystubs(),
+      this.getProfiles(),
     ]);
 
     // [4g-1] Also fetch in-progress draft data for the currently-open period.
@@ -7319,7 +7552,7 @@ const DAL = {
       ? await this.getDraftData(openPeriod.id)
       : { timesheets: [], timeEntries: [], mileageEntries: [], reimbursements: [] };
 
-    return { company, taxRates, employees, payPeriods, paystubs, draftData };
+    return { company, taxRates, employees, payPeriods, paystubs, draftData, profiles };
   },
 
 
@@ -7469,9 +7702,19 @@ const DAL = {
           };
         }
 
+        // [AL-1] Audit fields — kept on every period so the Activity Log can
+        // surface "who did what when". Finalize stamps are always present;
+        // edit/void stamps only when those actions happened.
+        if (ps.finalized_at) {
+          period.finalized_at = ps.finalized_at;
+          period.finalized_by = ps.finalized_by || null;
+        }
+
         // edited_at — only attach if the paystub has ever been edited.
         if (ps.last_edited_at) {
-          period.edited_at = ps.last_edited_at;
+          period.edited_at      = ps.last_edited_at;
+          period.last_edited_by = ps.last_edited_by || null;
+          period.edit_count     = ps.edit_count || 0;
         }
 
         // Voided fields — only attach if row is voided.
@@ -7602,6 +7845,14 @@ const DAL = {
       };
     }
 
+    // [AL-1] Profile lookup map: UUID → { full_name, role }. Used by the
+    // Activity Log to resolve voided_by / last_edited_by / finalized_by.
+    // Empty object is fine — actor names will fall back to "(unknown user)".
+    const profilesById = {};
+    for (const p of (raw.profiles || [])) {
+      if (p && p.id) profilesById[p.id] = { full_name: p.full_name || '', role: p.role || '' };
+    }
+
     return {
       company:        stateCompany,
       tax_rates:      stateTaxRates,
@@ -7610,6 +7861,7 @@ const DAL = {
       current_period: currentPeriod,
       employees:      stateEmployees,
       draft_period:   draftPeriod,
+      profiles_by_id: profilesById,
     };
   },
 
