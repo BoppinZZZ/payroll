@@ -8477,6 +8477,14 @@ function requireAdmin(actionName) {
 // the initial showView("dashboard") call on page load.
 
 
+// [Tab-focus fix] Track which user we've already hydrated for. Supabase v2
+// fires `SIGNED_IN` again every time the tab regains focus (it re-validates
+// the session). Without this guard the listener would re-show the loading
+// overlay and re-fetch all data on every tab switch — a bad UX. We only
+// hydrate when the user actually changes (initial sign-in, or sign-out then
+// sign-in as someone else). Reset to null on sign-out.
+let lastHydratedUserId = null;
+
 // Decide which view to show on page load.
 async function initAuth() {
   // DEVELOPMENT BYPASS: file:// has no HTTPS, so magic links can't work.
@@ -8494,6 +8502,7 @@ async function initAuth() {
     // hides the overlay when it finishes (success or failure).
     showHydratingOverlay();
     showAppView();
+    lastHydratedUserId = session.user.id;        // [Tab-focus fix] remember who we hydrated for
     hydrateAndRender();                          // [4e-1c] cloud data replaces localStorage STATE
   } else {
     showLoginView();
@@ -8503,15 +8512,20 @@ async function initAuth() {
   // Lets the view swap automatically after a magic-link redirect or sign-out.
   supabaseClient.auth.onAuthStateChange((event, session) => {
     if (session) {
-      // [Polish] Same overlay pattern for magic-link sign-in flow: cover
-      // the dashboard until hydrate completes.
-      if (event === 'SIGNED_IN') showHydratingOverlay();
+      // [Tab-focus fix] Supabase v2 fires SIGNED_IN again on tab focus as a
+      // session re-validation. If it's the same user we already hydrated for,
+      // skip the overlay + hydrate so the screen doesn't flash to "Loading…"
+      // every time the user switches Chrome tabs. We still call showAppView
+      // unconditionally (it's idempotent) to handle cross-tab sign-in cases.
+      const isNewUser = session.user && session.user.id !== lastHydratedUserId;
+      if (event === 'SIGNED_IN' && isNewUser) showHydratingOverlay();
       showAppView();
-      // [4e-1c] Only rehydrate on actual sign-in events — skip INITIAL_SESSION
-      // (already handled by the getSession branch above) and TOKEN_REFRESHED
-      // (no data change, just a new JWT).
-      if (event === 'SIGNED_IN') hydrateAndRender();
+      if (event === 'SIGNED_IN' && isNewUser) {
+        lastHydratedUserId = session.user.id;
+        hydrateAndRender();
+      }
     } else {
+      lastHydratedUserId = null;                 // [Tab-focus fix] reset so next sign-in re-hydrates
       showLoginView();
     }
   });
