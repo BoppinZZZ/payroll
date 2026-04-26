@@ -192,7 +192,9 @@
   td { padding: 16px 24px; border-bottom: 1px solid var(--border-soft); font-size: 15px; font-variant-numeric: tabular-nums; }
   tr:last-child td { border-bottom: none; }
   tr.clickable { cursor: pointer; transition: background 0.1s; }
-  tr.clickable:hover td { background: #fafbfd; }
+  /* [R-5] Clickable table rows: smooth hover with a subtle teal tint to signal interactivity. */
+  tr.clickable { transition: background 0.15s ease; }
+  tr.clickable:hover td { background: var(--primary-soft); }
   /* [R-2] Tabular numerals so digits in stacked rows line up to the pixel.
      Plex Sans includes proper tabular figures via font-feature-settings. */
   td.num   { text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -252,14 +254,14 @@
   .entry-table { margin-bottom: 10px; }
   .entry-table th, .entry-table td { padding: 8px 12px; }
   .entry-table th { background: transparent; border-bottom: 1px solid var(--border); }
-  .entry-table td { border-bottom: 1px solid #f1f5f9; }
+  .entry-table td { border-bottom: 1px solid var(--border-soft); }
   .cell-input { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-family: inherit; font-size: 14px; background: white; }
   .cell-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
   .auto-cell { text-align: right; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
   .row-actions { text-align: center; width: 40px; }
   .btn-icon { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); background: white; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; }
   .btn-icon:hover { background: var(--red-soft); color: var(--red); border-color: var(--red-soft); }
-  .draft-summary { margin-top: 24px; padding: 16px 20px; background: #f8fafc; border-radius: 8px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; font-size: 14px; }
+  .draft-summary { margin-top: 24px; padding: 16px 20px; background: var(--bg); border-radius: 8px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; font-size: 14px; }
   .draft-summary > div { display: flex; flex-direction: column; gap: 4px; }
   .draft-summary span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
   .draft-summary strong { font-size: 18px; font-variant-numeric: tabular-nums; }
@@ -287,7 +289,7 @@
   .paystub-edited-note { font-size: 12px; color: var(--muted); font-style: italic; margin-top: 6px; }
 
   /* ---------- Step 3.1: Period-in-progress indicators ---------- */
-  .period-status { display: flex; align-items: center; gap: 16px; padding: 14px 20px; background: var(--primary-soft); border: 1px solid #c7d2fe; border-radius: 10px; margin-bottom: 20px; font-size: 14px; }
+  .period-status { display: flex; align-items: center; gap: 16px; padding: 14px 20px; background: var(--primary-soft); border: 1px solid var(--primary); border-radius: 10px; margin-bottom: 20px; font-size: 14px; }
   .period-status .ps-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px rgba(30, 64, 175, 0.15); flex-shrink: 0; }
   .period-status .ps-status { font-weight: 600; color: var(--primary); }
   .period-status .ps-detail { color: var(--text); }
@@ -458,7 +460,7 @@
   .emp-form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); cursor: pointer; }
   .emp-form-error { color: var(--red); font-size: 12px; margin-top: 6px; display: none; }
   .emp-form-error.show { display: block; }
-  .emp-modal-footer { padding: 14px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; background: #f8fafc; border-radius: 0 0 12px 12px; }
+  .emp-modal-footer { padding: 14px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; background: var(--bg); border-radius: 0 0 12px 12px; }
 
   /* ---------- Run Payroll Picker (Step 2d) ---------- */
   .rpp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
@@ -467,7 +469,7 @@
   .rpp-card-top { display: flex; align-items: center; gap: 12px; }
   .rpp-card-meta { display: flex; justify-content: space-between; align-items: center; padding-top: 12px; border-top: 1px solid var(--border); }
   .rpp-status { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 10px; border-radius: 999px; }
-  .rpp-status.not-started { background: #f1f5f9; color: var(--muted); }
+  .rpp-status.not-started { background: var(--border-soft); color: var(--muted); }
   .rpp-status.in-progress { background: var(--amber-soft); color: var(--amber); }
   .rpp-card-arrow { color: var(--muted); font-size: 18px; }
   .rpp-entry-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding: 12px 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
@@ -488,10 +490,10 @@
   .cpw-status-badge.ready { background: var(--primary-soft); color: var(--primary); }
   .cpw-status-badge.complete { background: var(--green-soft); color: var(--green); }
   .cpw-emp-list { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
-  .cpw-emp-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-radius: 8px; background: #f8fafc; }
+  .cpw-emp-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-radius: 8px; background: var(--bg); }
   .cpw-emp-name { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; }
   .cpw-emp-status { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 10px; border-radius: 999px; }
-  .cpw-emp-status.not-started { background: #f1f5f9; color: var(--muted); }
+  .cpw-emp-status.not-started { background: var(--border-soft); color: var(--muted); }
   .cpw-emp-status.in-progress { background: var(--amber-soft); color: var(--amber); }
   .cpw-emp-status.finalized { background: var(--green-soft); color: var(--green); }
 
@@ -531,7 +533,7 @@
   .tf-form-section-title { font-size: 18px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
   .tf-form-section-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
   /* Tax ID strip (Chunk 5): shows EIN / CA Employer Account # just under the section header */
-  .tf-tax-id-strip { display: flex; align-items: baseline; gap: 10px; background: #f8fafc; border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-top: 10px; margin-bottom: 4px; }
+  .tf-tax-id-strip { display: flex; align-items: baseline; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-top: 10px; margin-bottom: 4px; }
   .tf-tax-id-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-size: 10px; }
   .tf-tax-id-value { font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; font-weight: 500; color: var(--text); }
   .tf-tax-id-value-missing { font-size: 12px; color: var(--muted); font-style: italic; }
@@ -600,7 +602,7 @@
      for the selected quarter. Column totals at the bottom should match the
      Form 941 / 940 / DE 88 rollups on the same page. */
   .deposit-history-section table { margin-top: 4px; }
-  .deposit-history-section tfoot td { border-top: 2px solid var(--text); background: #fafbfd; padding-top: 14px; }
+  .deposit-history-section tfoot td { border-top: 2px solid var(--text); background: var(--bg); padding-top: 14px; }
   .deposit-history-view { background: var(--primary-soft); color: var(--primary); border: 1px solid transparent; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
   .deposit-history-view:hover { background: var(--primary); color: white; }
 
@@ -717,7 +719,7 @@
     transition: background 0.15s;
   }
 
-  .login-btn:hover:not(:disabled) { background: #1a3a9e; }
+  .login-btn:hover:not(:disabled) { background: var(--primary-dark); }
   .login-btn:disabled             { background: #9ca3af; cursor: not-allowed; }
 
   .login-status {
@@ -2252,7 +2254,7 @@ function renderNonAdminStub() {
   return `
     <div style="max-width:560px; margin:80px auto 0; padding:32px 28px; background:white; border:1px solid var(--border); border-radius:12px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.04);">
       <h2 style="margin:0 0 16px; font-size:20px; color:var(--text);">Account setup in progress</h2>
-      <p style="margin:0 0 24px; color:#4b5563; line-height:1.6;">
+      <p style="margin:0 0 24px; color:var(--muted); line-height:1.6;">
         Welcome! Your timesheet will appear here once your admin links your account to your employee record. This usually takes just a few minutes — please reach out to your administrator.
       </p>
       <a class="btn primary" href="mailto:chrischan9231@gmail.com?subject=Payroll%20App%20Account%20Setup" style="text-decoration:none;">Contact admin</a>
@@ -5583,10 +5585,10 @@ function downloadPaystubPdf(employeeId, pp) {
     y += 6;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(11);
-    doc.setTextColor(30, 64, 175);
+    doc.setTextColor(15, 118, 110);
     doc.text(label, C1, y);
     y += 5;
-    doc.setDrawColor(30, 64, 175);
+    doc.setDrawColor(15, 118, 110);
     doc.setLineWidth(1);
     doc.line(C1, y, C5, y);
     doc.setDrawColor(200);
@@ -5596,7 +5598,7 @@ function downloadPaystubPdf(employeeId, pp) {
   // ---- Company header ----
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(16);
-  doc.setTextColor(30, 64, 175);
+  doc.setTextColor(15, 118, 110);  // [R-5] teal — was old blue (30, 64, 175)
   doc.text(company.name || 'Company', C1, y);
   y += 18;
 
