@@ -25,22 +25,46 @@
 <style>
   /* ---------- Base ---------- */
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* [R-1] Trust + Stability palette: warm cream + deep teal + muted gold.
+     Replaces the previous cool blue theme. Keeps semantic green/red/amber/purple
+     for status indicators but warms them to harmonize with the new neutrals. */
   :root {
-    --bg: #f6f8fb;
-    --panel: #ffffff;
-    --border: #e4e8ef;
-    --text: #0f172a;
-    --muted: #64748b;
-    --primary: #1e40af;
-    --primary-soft: #e0ebff;
+    /* ---- Surfaces ---- */
+    --bg: #FBF9F6;              /* warm cream — main page background */
+    --panel: #FFFFFF;           /* white — cards, panels, modals */
+    --border: #E7E2D8;          /* warm cream-gray border */
+    --border-soft: #EFEBE3;     /* even softer for subtle dividers */
+
+    /* ---- Text ---- */
+    --text: #1C1917;            /* warm charcoal */
+    --muted: #78716C;           /* warm gray for secondary text */
+
+    /* ---- Brand: deep teal ---- */
+    --primary: #0F766E;         /* primary button/active states */
+    --primary-soft: #CCFBF1;    /* light teal tints (focus rings, soft fills) */
+    --primary-dark: #115E59;    /* darker teal for hover/active on primary buttons */
+
+    /* ---- Accent: muted gold ---- */
+    --accent: #CA8A04;          /* gold accent — used sparingly */
+    --accent-soft: #FEF3C7;     /* light gold tint */
+    --accent-dark: #A16207;     /* darker gold */
+
+    /* ---- Sidebar (dark surface) ---- */
+    --sidebar-bg: #0C2A2A;      /* deep teal, almost black */
+    --sidebar-border: #163838;  /* slightly lighter for dividers in sidebar */
+    --sidebar-hover: #134E4A;   /* hover state for nav items */
+    --sidebar-text: #E6F4F1;    /* light text on dark sidebar */
+    --sidebar-muted: #94A8A4;   /* muted text on sidebar (footer info, sub-labels) */
+
+    /* ---- Semantic status colors (warmed to match palette) ---- */
     --green: #047857;
-    --green-soft: #d1fae5;
-    --red: #b91c1c;
-    --red-soft: #fee2e2;
-    --amber: #b45309;
-    --amber-soft: #fef3c7;
-    --purple: #6d28d9;
-    --purple-soft: #ede9fe;
+    --green-soft: #D1FAE5;
+    --red: #9F1239;
+    --red-soft: #FFE4E6;
+    --amber: #A16207;
+    --amber-soft: #FEF3C7;
+    --purple: #7C3AED;
+    --purple-soft: #EDE9FE;
   }
   html, body {
     height: 100%;
@@ -79,24 +103,25 @@
 
   /* ---------- Sidebar ---------- */
   .sidebar {
-    background: #0f172a; color: #e2e8f0;
+    background: var(--sidebar-bg); color: var(--sidebar-text);
     padding: 24px 16px; display: flex; flex-direction: column; gap: 4px;
   }
-  .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 20px 8px; border-bottom: 1px solid #1e293b; margin-bottom: 16px; }
-  .brand-logo { width: 36px; height: 36px; background: linear-gradient(135deg, #3b82f6, #1e40af); border-radius: 8px; display: grid; place-items: center; color: white; font-weight: 700; font-size: 17px; }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 20px 8px; border-bottom: 1px solid var(--sidebar-border); margin-bottom: 16px; }
+  /* [R-1] Solid teal logo (gradient removed — gradients read as vibe-coded). */
+  .brand-logo { width: 36px; height: 36px; background: var(--primary); border-radius: 8px; display: grid; place-items: center; color: white; font-weight: 700; font-size: 17px; }
   .brand-name { font-weight: 600; font-size: 15px; color: white; }
-  .brand-sub { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+  .brand-sub { font-size: 12px; color: var(--sidebar-muted); margin-top: 2px; }
   .nav-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; padding: 12px 10px 6px 10px; }
-  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; color: #cbd5e1; font-size: 14px; cursor: pointer; transition: all .15s ease; user-select: none; }
-  .nav-item:hover { background: #1e293b; color: white; }
-  .nav-item.active { background: #1e40af; color: white; }
+  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; color: var(--sidebar-text); font-size: 14px; cursor: pointer; transition: all .15s ease; user-select: none; }
+  .nav-item:hover { background: var(--sidebar-hover); color: white; }
+  .nav-item.active { background: var(--primary); color: white; }
   .nav-item .icon { width: 18px; text-align: center; opacity: .9; }
-  .nav-item.disabled { color: #475569; cursor: not-allowed; }
-  .nav-item.disabled:hover { background: transparent; color: #475569; }
-  .soon-tag { margin-left: auto; font-size: 10px; background: #334155; padding: 2px 6px; border-radius: 4px; color: #94a3b8; }
-  .sidebar-footer { margin-top: auto; padding: 12px 8px; border-top: 1px solid #1e293b; font-size: 12px; color: #94a3b8; }
-  .footer-btn { margin-top: 10px; width: 100%; padding: 8px; font-size: 12px; background: #1e293b; color: #cbd5e1; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
-  .footer-btn:hover { background: #334155; color: white; }
+  .nav-item.disabled { color: var(--sidebar-muted); cursor: not-allowed; opacity: 0.5; }
+  .nav-item.disabled:hover { background: transparent; color: var(--sidebar-muted); }
+  .soon-tag { margin-left: auto; font-size: 10px; background: var(--sidebar-border); padding: 2px 6px; border-radius: 4px; color: var(--sidebar-muted); }
+  .sidebar-footer { margin-top: auto; padding: 12px 8px; border-top: 1px solid var(--sidebar-border); font-size: 12px; color: var(--sidebar-muted); }
+  .footer-btn { margin-top: 10px; width: 100%; padding: 8px; font-size: 12px; background: var(--sidebar-hover); color: var(--sidebar-text); border: none; border-radius: 6px; cursor: pointer; font-family: inherit; transition: background .15s ease; }
+  .footer-btn:hover { background: var(--sidebar-border); color: white; }
 
   /* ---------- Main ---------- */
   .main { padding: 32px 40px; overflow-y: auto; }
@@ -105,9 +130,9 @@
   .page-sub { color: var(--muted); font-size: 14px; margin-top: 4px; }
 
   .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--border); background: white; color: var(--text); font-size: 14px; font-weight: 500; cursor: pointer; transition: all .15s ease; font-family: inherit; white-space: nowrap; }
-  .btn:hover { border-color: #cbd5e1; }
+  .btn:hover { border-color: var(--muted); }
   .btn.primary { background: var(--primary); border-color: var(--primary); color: white; }
-  .btn.primary:hover { background: #1e3a8a; }
+  .btn.primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
   .btn.ghost { background: transparent; border-color: transparent; }
   .btn.small { padding: 6px 12px; font-size: 13px; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -152,7 +177,8 @@
 
   /* ---------- Paystub ---------- */
   .paystub { max-width: 780px; margin: 0 auto; background: white; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-  .paystub-header { background: linear-gradient(135deg, #1e40af, #1e3a8a); color: white; padding: 28px 32px; display: flex; justify-content: space-between; align-items: flex-start; }
+  /* [R-1] Solid teal paystub header (gradient removed). */
+  .paystub-header { background: var(--primary); color: white; padding: 28px 32px; display: flex; justify-content: space-between; align-items: flex-start; }
   .paystub-co { font-size: 20px; font-weight: 700; }
   .paystub-co-sub { font-size: 13px; opacity: .85; margin-top: 2px; }
   .paystub-meta { text-align: right; font-size: 13px; }
@@ -180,8 +206,8 @@
   /* ---------- Notice ---------- */
   .notice { background: #fffbeb; border: 1px solid #fde68a; color: #78350f; padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; display: flex; gap: 10px; align-items: flex-start; }
   .notice strong { color: #78350f; }
-  .notice.info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
-  .notice.info strong { color: #1e40af; }
+  .notice.info { background: var(--primary-soft); border-color: var(--primary); color: var(--primary-dark); }
+  .notice.info strong { color: var(--primary-dark); }
 
   /* ---------- Empty state ---------- */
   .empty { padding: 40px 22px; text-align: center; color: var(--muted); }
@@ -191,7 +217,7 @@
 
   /* ---------- Step 2: PP entry form ---------- */
   .subpanel-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
-  .entry-help { font-size: 13px; color: var(--muted); margin-bottom: 10px; background: #f8fafc; padding: 8px 12px; border-radius: 6px; border: 1px solid #e2e8f0; }
+  .entry-help { font-size: 13px; color: var(--muted); margin-bottom: 10px; background: var(--bg); padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); }
   .entry-table { margin-bottom: 10px; }
   .entry-table th, .entry-table td { padding: 8px 12px; }
   .entry-table th { background: transparent; border-bottom: 1px solid var(--border); }
@@ -233,11 +259,12 @@
   .period-status { display: flex; align-items: center; gap: 16px; padding: 14px 20px; background: var(--primary-soft); border: 1px solid #c7d2fe; border-radius: 10px; margin-bottom: 20px; font-size: 14px; }
   .period-status .ps-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px rgba(30, 64, 175, 0.15); flex-shrink: 0; }
   .period-status .ps-status { font-weight: 600; color: var(--primary); }
-  .period-status .ps-detail { color: #334155; }
+  .period-status .ps-detail { color: var(--text); }
   .period-status.ended { background: var(--green-soft); border-color: #bbf7d0; }
   .period-status.ended .ps-dot { background: var(--green); box-shadow: 0 0 0 4px rgba(4, 120, 87, 0.15); }
   .period-status.ended .ps-status { color: var(--green); }
-  .entry-table tr.today-row td { background: linear-gradient(to right, #eff6ff, transparent 40%); border-left: 3px solid var(--primary); }
+  /* [R-1] Solid soft tint for today-row (gradient removed). */
+  .entry-table tr.today-row td { background: var(--primary-soft); border-left: 3px solid var(--primary); }
   .entry-table tr.today-row td:first-child { position: relative; }
   .entry-table tr.today-row td:first-child::after { content: "today"; position: absolute; top: 2px; right: 4px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--primary); font-weight: 700; }
 
@@ -413,7 +440,7 @@
   .deposit-summary-actions { display: flex; gap: 10px; flex-shrink: 0; }
   .deposit-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; margin-top: 20px; }
   .deposit-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px 24px; display: flex; flex-direction: column; gap: 16px; }
-  .deposit-card.bucket-941 { border-top: 4px solid #1e40af; }  /* Federal blue */
+  .deposit-card.bucket-941 { border-top: 4px solid var(--primary); }  /* Federal — primary teal */
   .deposit-card.bucket-940 { border-top: 4px solid #b45309; }  /* FUTA amber */
   .deposit-card.bucket-edd { border-top: 4px solid #047857; }  /* CA green */
   .deposit-card-name { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
@@ -426,10 +453,10 @@
   .deposit-card-copy.copied { background: var(--green); color: white; }
   .deposit-card-section { display: flex; flex-direction: column; gap: 4px; border-top: 1px dashed var(--border); padding-top: 12px; }
   .deposit-card-section-label { font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
-  .deposit-card-row { display: grid; grid-template-columns: 1fr auto; font-size: 13px; color: #334155; padding: 3px 0; font-variant-numeric: tabular-nums; gap: 10px; }
+  .deposit-card-row { display: grid; grid-template-columns: 1fr auto; font-size: 13px; color: var(--text); padding: 3px 0; font-variant-numeric: tabular-nums; gap: 10px; }
   .deposit-card-row.muted { color: var(--muted); font-size: 12px; }
   .deposit-card-emp { display: grid; grid-template-columns: 1fr auto; font-size: 13px; padding: 4px 0; font-variant-numeric: tabular-nums; gap: 10px; }
-  .deposit-card-emp-name { color: #334155; }
+  .deposit-card-emp-name { color: var(--text); }
   .deposit-card-emp-amt { color: var(--text); font-weight: 600; }
   /* Print-only block at the bottom (hidden in screen view, shown when printing) */
   .deposit-print-only { display: none; }
@@ -567,7 +594,7 @@
     line-height: 1.4;
   }
 
-  .login-status-info    { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+  .login-status-info    { background: var(--primary-soft); color: var(--primary-dark); border: 1px solid var(--primary); }
   .login-status-success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
   .login-status-error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
 
@@ -663,15 +690,15 @@
 
     <div class="sidebar-footer">
       <div>Current pay period</div>
-      <strong style="color:#e2e8f0;" id="current-period-label">PP9 · Apr 18 – May 1, 2026</strong>
+      <strong style="color:var(--sidebar-text);" id="current-period-label">PP9 · Apr 18 – May 1, 2026</strong>
       <button class="footer-btn admin-only" onclick="handleResetData()" title="Reload the original imported Excel data, discarding any changes">Reset to imported data</button>
 
       <!-- PHASE 2 CHUNK 4d — Auth account section -->
       <!-- Shown only when the user has an active Supabase session. Hidden by -->
       <!-- default so file:// bypass users (no session) don't see it.         -->
-      <div id="authAccount" style="display:none; margin-top: 16px; padding-top: 16px; border-top: 1px solid #334155;">
-        <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">Signed in as</div>
-        <div id="authEmail" style="color: #e2e8f0; font-size: 13px; word-break: break-all; margin-bottom: 8px;">—</div>
+      <div id="authAccount" style="display:none; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--sidebar-border);">
+        <div style="font-size: 11px; color: var(--sidebar-muted); margin-bottom: 4px;">Signed in as</div>
+        <div id="authEmail" style="color: var(--sidebar-text); font-size: 13px; word-break: break-all; margin-bottom: 8px;">—</div>
         <button class="footer-btn" onclick="signOut()" title="Sign out and return to the login screen">Sign out</button>
       </div>
     </div>
@@ -743,7 +770,7 @@
     </div>
     <div class="emp-modal-body">
       <!-- Context banner (employee name + PP number) — populated by openEditPaystubModal -->
-      <div id="paystub-edit-context" style="font-size:13px; color:#334155; margin-bottom:16px; padding:10px 12px; background:var(--primary-soft); border:1px solid #c7d2fe; border-radius:8px;">
+      <div id="paystub-edit-context" style="font-size:13px; color:var(--text); margin-bottom:16px; padding:10px 12px; background:var(--primary-soft); border:1px solid var(--primary); border-radius:8px;">
         &nbsp;
       </div>
       <div class="emp-form-field">
