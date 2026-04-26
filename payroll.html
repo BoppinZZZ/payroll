@@ -826,6 +826,8 @@
     <div class="nav-item" data-view="run-payroll"><span class="icon">◆</span> Run Payroll</div>
     <div class="nav-item" data-view="history"><span class="icon">◆</span> History</div>
     <div class="nav-item admin-only" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
+    <!-- [WG-3] Year-End: hosts W-2 forms and annual totals. Admin-only. -->
+    <div class="nav-item admin-only" data-view="year-end"><span class="icon">◆</span> Year-End</div>
 
     <div class="nav-label">Setup</div>
     <div class="nav-item admin-only" data-view="settings"><span class="icon">◆</span> Settings</div>
@@ -996,8 +998,8 @@ let currentUserRole = null;   // 'admin' | 'employee' | null (not signed in)
 let currentUserId   = null;   // UUID of signed-in user, or null
 let currentUserName = null;   // full_name from profiles, or null
 // [E-1] Employees now have scoped views for dashboard, employees, tax-rates
-// (see E-2/E-3/E-7). Only tax-filings and settings remain admin-only.
-const ADMIN_ONLY_VIEWS = ['tax-filings', 'settings'];
+// (see E-2/E-3/E-7). Tax-filings, settings, and year-end stay admin-only.
+const ADMIN_ONLY_VIEWS = ['tax-filings', 'settings', 'year-end'];
 
 
 // ============================================================================
@@ -1287,6 +1289,7 @@ let currentView = "dashboard";
 let currentPaystubContext = null;  // { employeeId, pp } when viewing a paystub
 let runPayrollSelectedEmp = null;  // employee id currently being edited in Run Payroll; null = picker view
 let taxFilingsSelection = null;    // { year, quarter } selected on Tax Filings page; null = default to current quarter
+let yearEndSelection = null;       // [WG-3] { year } selected on Year-End page; null = default to most recent year with data
 
 // ============================================================================
 // 3. UTILITY FUNCTIONS
@@ -4762,6 +4765,153 @@ function handleImportBackupFile(evt) {
 }
 
 // ============================================================================
+// [WG-3] YEAR-END — W-2 forms and annual totals
+// ----------------------------------------------------------------------------
+// Admin-only view that lists each employee's year-end W-2 box totals plus
+// a "Download W-2 PDF" button (wired in WG-4). Year selector defaults to
+// the most recent year that has paystub data, falling back to current year.
+//
+// The "Year-End" label (rather than "W-2") is intentional — this surface
+// can later host 1099-NEC, 1095-C healthcare, and other annual filings
+// without renaming the nav item.
+// ============================================================================
+
+function setYearEndYear(year) {
+  yearEndSelection = { year };
+  showView('year-end');
+}
+
+function renderYearEnd() {
+  if (currentUserRole !== 'admin') return renderNonAdminStub();
+
+  // Pick the displayed year. Order of preference:
+  //   1. Explicit user selection (yearEndSelection)
+  //   2. Most recent year with paystub data
+  //   3. Current calendar year (for new-firm empty state)
+  const yearsAvailable = yearsWithPaystubs();
+  const fallbackYear = yearsAvailable.length
+    ? yearsAvailable[yearsAvailable.length - 1]
+    : new Date().getFullYear();
+  const displayYear = (yearEndSelection && yearEndSelection.year) || fallbackYear;
+
+  // Build the year selector. Always include the displayYear even if no data,
+  // plus the current year so admins can see "no data yet" for the year in progress.
+  const currentCalYear = new Date().getFullYear();
+  const yearSet = new Set(yearsAvailable);
+  yearSet.add(displayYear);
+  yearSet.add(currentCalYear);
+  const yearList = Array.from(yearSet).sort((a, b) => b - a);  // newest first
+  const yearOptions = yearList
+    .map(y => `<option value="${y}" ${y === displayYear ? 'selected' : ''}>${y}</option>`)
+    .join('');
+
+  // Filter to employees who have at least one active paystub in this year.
+  // Inactive (terminated) employees still appear if they were paid this year
+  // — they need a W-2 too.
+  const employeesForYear = STATE.employees.filter(emp =>
+    paystubsInYear(emp, displayYear).length > 0
+  );
+
+  const company = STATE.company || {};
+  const fmtMoney = n => money(n);
+
+  // Helper: render one address-status hint (green check if filled, amber warn if missing)
+  const addressHint = emp => {
+    const filled = !!(emp.street && emp.city && emp.state && emp.zip);
+    return filled
+      ? `<span class="badge active" style="font-size:11px;">Address on file</span>`
+      : `<span class="badge pending" style="font-size:11px;">Address missing — edit on Employees page</span>`;
+  };
+
+  // Per-employee W-2 summary card. Each box is shown with its IRS number,
+  // description, and the computed amount.
+  const cards = employeesForYear.map(emp => {
+    const t = yearEndTotals(emp, displayYear);
+    const ssRate     = (STATE.tax_rates && STATE.tax_rates.ss_ee)       || 0;
+    const medRate    = (STATE.tax_rates && STATE.tax_rates.medicare_ee) || 0;
+
+    // Sanity check: Box 4 should equal Box 3 × SS rate (within rounding).
+    // Show a small "looks right ✓" indicator if so, otherwise flag for review.
+    const expectedSs  = t.box3_ss_wages * ssRate;
+    const ssDelta     = Math.abs(t.box4_ss_wh - expectedSs);
+    const ssReconciled = ssDelta < 1.00; // within $1 = OK
+    const reconcileBadge = ssReconciled
+      ? `<span style="font-size:11px; color:var(--green);">✓ Reconciles to per-paystub totals</span>`
+      : `<span style="font-size:11px; color:var(--red);">⚠ Review: SS withholding ($${t.box4_ss_wh.toFixed(2)}) doesn't match expected ($${expectedSs.toFixed(2)})</span>`;
+
+    return `
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">${esc(emp.name)} — W-2 ${displayYear}</div>
+            <div class="panel-sub">${esc(emp.employee_id || '—')} · ${t.paystub_count} paystubs · ${addressHint(emp)}</div>
+          </div>
+          <button class="btn primary" onclick="downloadW2Pdf('${emp.id}', ${displayYear})">Download W-2 PDF</button>
+        </div>
+        <div class="panel-body">
+          <table style="width:100%; border-collapse:collapse;">
+            <thead>
+              <tr>
+                <th style="width:60px;">Box</th>
+                <th>Description</th>
+                <th style="text-align:right; width:140px;">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>1</td><td>Wages, tips, other compensation</td><td class="money">${fmtMoney(t.box1_wages)}</td></tr>
+              <tr><td>2</td><td>Federal income tax withheld</td><td class="money">${fmtMoney(t.box2_fed_wh)}</td></tr>
+              <tr><td>3</td><td>Social Security wages</td><td class="money">${fmtMoney(t.box3_ss_wages)}</td></tr>
+              <tr><td>4</td><td>Social Security tax withheld (${(ssRate*100).toFixed(2)}%)</td><td class="money">${fmtMoney(t.box4_ss_wh)}</td></tr>
+              <tr><td>5</td><td>Medicare wages and tips</td><td class="money">${fmtMoney(t.box5_medicare)}</td></tr>
+              <tr><td>6</td><td>Medicare tax withheld (${(medRate*100).toFixed(2)}%)</td><td class="money">${fmtMoney(t.box6_medicare_wh)}</td></tr>
+              <tr><td>14</td><td>Other — CA SDI</td><td class="money">${fmtMoney(t.box14_ca_sdi)}</td></tr>
+              <tr><td>15</td><td>State / Employer state ID</td><td style="text-align:right;">CA / ${esc(company.ca_employer_account || '—')}</td></tr>
+              <tr><td>16</td><td>State wages, tips, etc.</td><td class="money">${fmtMoney(t.box16_state_wages)}</td></tr>
+              <tr><td>17</td><td>State income tax withheld</td><td class="money">${fmtMoney(t.box17_state_wh)}</td></tr>
+            </tbody>
+          </table>
+          <div style="margin-top:12px;">${reconcileBadge}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  const emptyState = `
+    <div class="panel" style="padding:48px; text-align:center;">
+      <div style="font-size:16px; color:var(--text); margin-bottom:8px; font-weight:500;">No paystubs yet for ${displayYear}</div>
+      <div style="font-size:14px; color:var(--muted);">W-2 forms become available once you've finalized at least one paystub for an employee in this year.</div>
+    </div>
+  `;
+
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Year-End</div>
+        <div class="page-sub">W-2 forms and annual totals · tax year ${displayYear}</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <select onchange="setYearEndYear(parseInt(this.value, 10))" class="quarter-select">
+          ${yearOptions}
+        </select>
+        ${employeesForYear.length > 0
+          ? `<button class="btn" onclick="downloadYearEndSummaryPdf(${displayYear})" title="One-page summary of all employees' year-end totals — useful when entering W-2 data into tax software">Download Summary</button>`
+          : ''}
+      </div>
+    </div>
+
+    <div class="notice info">
+      <span>ℹ</span>
+      <div>
+        <strong>How to use this page:</strong> Each card shows one employee's W-2 box totals for the year. Click "Download W-2 PDF" to get their copies (Annie keeps these for her records). When you're ready to file with the SSA in January, enter these same numbers into your tax software (Drake, ProConnect, etc.) — the values match Form 941 quarterly totals.
+        ${company.ein ? '' : '<br><br><strong>Note:</strong> Company EIN is not set. Add it on Settings before generating W-2s.'}
+      </div>
+    </div>
+
+    ${employeesForYear.length === 0 ? emptyState : cards}
+  `;
+}
+
+// ============================================================================
 // 4d. SETTINGS — Company Info editor (Chunk 2: page shell only)
 // ----------------------------------------------------------------------------
 // Additive: a new Settings page accessible from the left sidebar. This chunk
@@ -5139,6 +5289,7 @@ function showView(viewName) {
   else if (viewName === "history") html = renderHistory();
   else if (viewName === "run-payroll") html = renderRunPayroll();
   else if (viewName === "tax-filings") html = renderTaxFilings();
+  else if (viewName === "year-end") html = renderYearEnd();
   else if (viewName === "settings") html = renderSettings();
   else if (viewName === "tax-rates") html = renderTaxRates();
   else html = `<div class="empty">Unknown view</div>`;
@@ -5616,6 +5767,402 @@ async function submitEditPaystub() {
 // allEmployeesFinalizedForCurrentPP) all skip it. Restore clears `voided`
 // and deletes `voided_at`. Both are fully reversible — no data is lost.
 // ============================================================================
+
+// [WG-4] Download a one-page W-2 PDF for one employee for a specific year.
+// Format: a clean, tax-form-style layout that matches the IRS W-2 box
+// structure visually but doesn't try to be pixel-perfect to the official
+// red-ink Copy A (which can only be filed via SSA Business Services Online
+// or via tax software). This PDF is suitable for the employee's records
+// (Copies B + C + 2) — Anna's tax software handles the actual SSA filing.
+//
+// SSN field is rendered as a blank line — Anna handwrites it before giving
+// the W-2 to the employee, per our security choice in WG planning.
+function downloadW2Pdf(employeeId, year) {
+  if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
+    alert("PDF generator is still loading — please try again in a moment.");
+    return;
+  }
+
+  const emp = STATE.employees.find(e => e.id === employeeId);
+  if (!emp) { alert("Employee not found"); return; }
+
+  const t = yearEndTotals(emp, year);
+  if (t.paystub_count === 0) {
+    alert(`No paystubs for ${emp.name} in ${year} — nothing to put on a W-2.`);
+    return;
+  }
+
+  const company = STATE.company || {};
+
+  // ---- jsPDF setup ----
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+
+  const PAGE_W = 612;
+  const MARGIN = 40;
+  const CONTENT_W = PAGE_W - 2 * MARGIN;
+
+  // Currency formatter that always shows 2 decimals + thousands separators.
+  const fmtMoney = n => '$' + (Number(n) || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+  // Helper: draw a labeled "form box" — outer rectangle, label in top-left,
+  // value rendered below the label. Mimics the IRS W-2 visual style.
+  const drawBox = (x, y, w, h, label, value, opts = {}) => {
+    doc.setDrawColor(120);
+    doc.setLineWidth(0.5);
+    doc.rect(x, y, w, h);
+    // Label
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(90);
+    doc.text(label, x + 4, y + 9);
+    // Value
+    doc.setFont('helvetica', opts.bold !== false ? 'bold' : 'normal');
+    doc.setFontSize(opts.size || 11);
+    doc.setTextColor(20);
+    const lines = String(value == null ? '' : value).split('\n');
+    let lineY = y + (opts.valueOffset || 22);
+    for (const line of lines) {
+      if (opts.alignRight) {
+        doc.text(line, x + w - 6, lineY, { align: 'right' });
+      } else {
+        doc.text(line, x + 6, lineY);
+      }
+      lineY += 12;
+    }
+  };
+
+  // ---- Top header ----
+  let y = MARGIN;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(15, 118, 110);  // teal — matches app brand
+  doc.text('Form W-2 — Wage and Tax Statement', MARGIN, y + 6);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(90);
+  doc.text(`Tax Year ${year}`, PAGE_W - MARGIN, y + 6, { align: 'right' });
+  y += 14;
+  doc.setFontSize(9);
+  doc.text('Copy B — to be filed with employee’s federal tax return  ·  Copy C — for employee’s records', MARGIN, y + 6);
+  y += 18;
+
+  // Divider line under header
+  doc.setDrawColor(15, 118, 110);
+  doc.setLineWidth(1);
+  doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+  y += 14;
+
+  // ---- IDENTIFYING SECTION (a-f boxes, two columns) ----
+  // Left column: SSN, EIN, Employer name+address (taller box)
+  // Right column: Employee name, Employee address (taller box)
+  const colW = (CONTENT_W - 8) / 2;  // 8pt gutter
+  const xL = MARGIN;
+  const xR = MARGIN + colW + 8;
+
+  // Compose employer address
+  const emplAddrLines = [];
+  if (company.street) emplAddrLines.push(company.street);
+  const cityLine = [company.city, company.state, company.zip].filter(Boolean).join(' ').replace(/, $/, '');
+  if (cityLine) emplAddrLines.push(cityLine);
+  const emplBlock = [company.name || '', ...emplAddrLines].join('\n');
+
+  // Compose employee address
+  const empAddrLines = [];
+  if (emp.street) empAddrLines.push(emp.street);
+  const empCity = [emp.city, emp.state, emp.zip].filter(Boolean).join(' ').replace(/, $/, '');
+  if (empCity) empAddrLines.push(empCity);
+  const empAddrText = empAddrLines.length ? empAddrLines.join('\n') : '(address not on file)';
+
+  // Box a — Employee SSN (left, top) — blank for handwritten entry
+  drawBox(xL, y, colW, 36, 'a — Employee’s social security number', '___ — ___ — _____', { size: 10, bold: false });
+  // Box e — Employee name (right, top)
+  drawBox(xR, y, colW, 36, 'e — Employee’s first name and initial / Last name', emp.name || '', { size: 11 });
+  y += 36;
+
+  // Box b — Employer EIN (left)
+  drawBox(xL, y, colW, 28, 'b — Employer identification number (EIN)', company.ein || '(not on file)', { size: 11 });
+  // Box d — Control number (right) — optional, leave blank
+  drawBox(xR, y, colW, 28, 'd — Control number (optional)', '', { size: 10 });
+  y += 28;
+
+  // Box c — Employer name and address (left, taller)
+  drawBox(xL, y, colW, 60, 'c — Employer’s name, address, and ZIP code', emplBlock, { size: 10, valueOffset: 22 });
+  // Box f — Employee address (right, taller)
+  drawBox(xR, y, colW, 60, 'f — Employee’s address and ZIP code', `${emp.name || ''}\n${empAddrText}`, { size: 10, valueOffset: 22 });
+  y += 60;
+
+  y += 12;
+
+  // ---- FEDERAL AMOUNTS SECTION (boxes 1-6) ----
+  // 3-column grid for amounts so they sit naturally beside each other.
+  const ampW = (CONTENT_W - 16) / 3;  // 8pt gutter between each
+  const x1 = MARGIN;
+  const x2 = MARGIN + ampW + 8;
+  const x3 = MARGIN + 2 * (ampW + 8);
+
+  drawBox(x1, y, ampW, 32, '1 — Wages, tips, other compensation', fmtMoney(t.box1_wages), { alignRight: true });
+  drawBox(x2, y, ampW, 32, '2 — Federal income tax withheld', fmtMoney(t.box2_fed_wh), { alignRight: true });
+  drawBox(x3, y, ampW, 32, '12a — Codes', '', { size: 10 });
+  y += 32;
+
+  drawBox(x1, y, ampW, 32, '3 — Social security wages', fmtMoney(t.box3_ss_wages), { alignRight: true });
+  drawBox(x2, y, ampW, 32, '4 — Social security tax withheld', fmtMoney(t.box4_ss_wh), { alignRight: true });
+  drawBox(x3, y, ampW, 32, '12b — Codes', '', { size: 10 });
+  y += 32;
+
+  drawBox(x1, y, ampW, 32, '5 — Medicare wages and tips', fmtMoney(t.box5_medicare), { alignRight: true });
+  drawBox(x2, y, ampW, 32, '6 — Medicare tax withheld', fmtMoney(t.box6_medicare_wh), { alignRight: true });
+  drawBox(x3, y, ampW, 32, '13 — Stat. emp / Retire. plan / Sick pay', '', { size: 8 });
+  y += 32;
+
+  drawBox(x1, y, ampW, 32, '7 — Social security tips', '', { alignRight: true });
+  drawBox(x2, y, ampW, 32, '8 — Allocated tips', '', { alignRight: true });
+  drawBox(x3, y, ampW, 32, '14 — Other', `CA SDI ${fmtMoney(t.box14_ca_sdi)}`, { alignRight: false, size: 9 });
+  y += 32;
+
+  y += 12;
+
+  // ---- STATE SECTION (boxes 15-20) ----
+  // Single row spanning 5 boxes for state info.
+  const stW = (CONTENT_W - 16) / 5;
+  const sX = i => MARGIN + i * (stW + 4);
+  drawBox(sX(0), y, stW, 32, '15 — State', 'CA', { size: 11 });
+  drawBox(sX(1), y, stW, 32, 'Employer’s state ID', company.ca_employer_account || '', { size: 9, alignRight: true });
+  drawBox(sX(2), y, stW, 32, '16 — State wages, tips, etc.', fmtMoney(t.box16_state_wages), { alignRight: true });
+  drawBox(sX(3), y, stW, 32, '17 — State income tax', fmtMoney(t.box17_state_wh), { alignRight: true });
+  drawBox(sX(4), y, stW, 32, '18-20 — Local (n/a)', '', { size: 10 });
+  y += 32;
+
+  // ---- Footer notice ----
+  y += 18;
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(9);
+  doc.setTextColor(120);
+  doc.text(
+    'Box a (Social Security number) is intentionally blank. The administrator will enter it by hand before delivery for security.',
+    MARGIN, y
+  );
+  y += 12;
+  doc.text(
+    `Generated by ${company.name || 'Anna Lee, CPA'} payroll system on ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}.`,
+    MARGIN, y
+  );
+
+  // ---- Save ----
+  const empSlug = (emp.name || 'employee').replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase().replace(/^-|-$/g, '');
+  const filename = `w2-${empSlug}-${year}.pdf`;
+  doc.save(filename);
+}
+
+// [WG-5] Download a one-page summary report aggregating all employees'
+// year-end totals for the given year. This is the "type-once" reference
+// document Anna uses when entering W-2 data into her tax software / SSA
+// Business Services Online — every employee on one sheet plus grand totals.
+function downloadYearEndSummaryPdf(year) {
+  if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
+    alert("PDF generator is still loading — please try again in a moment.");
+    return;
+  }
+
+  const employeesForYear = STATE.employees.filter(emp =>
+    paystubsInYear(emp, year).length > 0
+  );
+  if (employeesForYear.length === 0) {
+    alert(`No paystubs for ${year} — nothing to summarize.`);
+    return;
+  }
+
+  const company = STATE.company || {};
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+
+  const PAGE_W = 612;
+  const MARGIN = 40;
+  const CONTENT_W = PAGE_W - 2 * MARGIN;
+
+  const fmtMoney = n => '$' + (Number(n) || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+  let y = MARGIN;
+
+  // ---- Header ----
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(15, 118, 110);
+  doc.text(`Year-End Summary — ${year}`, MARGIN, y + 6);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(90);
+  doc.text(`Generated ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`, PAGE_W - MARGIN, y + 6, { align: 'right' });
+  y += 20;
+
+  // Company line under the title
+  doc.setFontSize(11);
+  doc.setTextColor(30);
+  doc.setFont('helvetica', 'bold');
+  doc.text(company.name || 'Company', MARGIN, y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(90);
+  const headerSubParts = [];
+  if (company.ein) headerSubParts.push(`EIN ${company.ein}`);
+  if (company.ca_employer_account) headerSubParts.push(`CA acct ${company.ca_employer_account}`);
+  if (headerSubParts.length) doc.text(headerSubParts.join('  ·  '), MARGIN, y + 12);
+  y += 24;
+
+  doc.setDrawColor(15, 118, 110);
+  doc.setLineWidth(1);
+  doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+  y += 14;
+
+  // ---- Per-employee table ----
+  // Columns: Name | Emp ID | Box 1 (Wages) | Box 2 (FedWH) | Box 3 (SS Wage) | Box 4 (SS WH) | Box 5 (Med) | Box 6 (Med WH) | Box 14 (CA SDI) | Box 16 (CA Wage) | Box 17 (CA WH)
+  // 11 columns is too many for letter portrait. Group: top half = federal, bottom half = state. Two-row-per-employee table.
+
+  // Helper: draw a row of cells at y, with given widths.
+  const drawRow = (cells, widths, opts = {}) => {
+    let x = MARGIN;
+    doc.setFont('helvetica', opts.bold ? 'bold' : 'normal');
+    doc.setFontSize(opts.size || 9);
+    doc.setTextColor(opts.color != null ? opts.color : 30);
+    for (let i = 0; i < cells.length; i++) {
+      const w = widths[i];
+      const align = i === 0 ? 'left' : 'right';
+      const tx = align === 'left' ? x + 4 : x + w - 4;
+      doc.text(String(cells[i] || ''), tx, y + 12, { align });
+      x += w;
+    }
+    if (opts.divider) {
+      doc.setDrawColor(200);
+      doc.setLineWidth(0.3);
+      doc.line(MARGIN, y + 18, MARGIN + widths.reduce((a, b) => a + b, 0), y + 18);
+    }
+  };
+
+  // Column widths: 5 federal columns + name col
+  const fedWidths = [
+    Math.round(CONTENT_W * 0.24),  // Name
+    Math.round(CONTENT_W * 0.10),  // Emp ID
+    Math.round(CONTENT_W * 0.14),  // Box 1
+    Math.round(CONTENT_W * 0.13),  // Box 2
+    Math.round(CONTENT_W * 0.13),  // Box 3
+    Math.round(CONTENT_W * 0.13),  // Box 4
+    Math.round(CONTENT_W * 0.13),  // Box 6
+  ];
+  // Adjust last col to fill any rounding gap
+  fedWidths[fedWidths.length - 1] = CONTENT_W - fedWidths.slice(0, -1).reduce((a, b) => a + b, 0);
+
+  // ---- Federal section ----
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(15, 118, 110);
+  doc.text('Federal — Boxes 1–6', MARGIN, y);
+  y += 14;
+
+  drawRow(
+    ['Employee', 'Emp ID', 'Box 1 Wages', 'Box 2 Fed WH', 'Box 3 SS Wages', 'Box 4 SS WH', 'Box 6 Med WH'],
+    fedWidths,
+    { bold: true, size: 8, color: 100, divider: true }
+  );
+  y += 22;
+
+  // Federal grand totals
+  const fedTotals = { box1: 0, box2: 0, box3: 0, box4: 0, box6: 0 };
+  for (const emp of employeesForYear) {
+    const t = yearEndTotals(emp, year);
+    drawRow(
+      [emp.name, emp.employee_id || '—', fmtMoney(t.box1_wages), fmtMoney(t.box2_fed_wh), fmtMoney(t.box3_ss_wages), fmtMoney(t.box4_ss_wh), fmtMoney(t.box6_medicare_wh)],
+      fedWidths,
+      { divider: true }
+    );
+    fedTotals.box1 += t.box1_wages;
+    fedTotals.box2 += t.box2_fed_wh;
+    fedTotals.box3 += t.box3_ss_wages;
+    fedTotals.box4 += t.box4_ss_wh;
+    fedTotals.box6 += t.box6_medicare_wh;
+    y += 20;
+  }
+  // Federal totals row
+  drawRow(
+    [`Totals (${employeesForYear.length} employees)`, '', fmtMoney(fedTotals.box1), fmtMoney(fedTotals.box2), fmtMoney(fedTotals.box3), fmtMoney(fedTotals.box4), fmtMoney(fedTotals.box6)],
+    fedWidths,
+    { bold: true }
+  );
+  y += 28;
+
+  // ---- State section ----
+  const stWidths = [
+    Math.round(CONTENT_W * 0.24),  // Name
+    Math.round(CONTENT_W * 0.10),  // Emp ID
+    Math.round(CONTENT_W * 0.18),  // Box 5 Medicare
+    Math.round(CONTENT_W * 0.16),  // Box 14 CA SDI
+    Math.round(CONTENT_W * 0.16),  // Box 16
+    Math.round(CONTENT_W * 0.16),  // Box 17
+  ];
+  stWidths[stWidths.length - 1] = CONTENT_W - stWidths.slice(0, -1).reduce((a, b) => a + b, 0);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(15, 118, 110);
+  doc.text('California — Boxes 5, 14, 16, 17', MARGIN, y);
+  y += 14;
+
+  drawRow(
+    ['Employee', 'Emp ID', 'Box 5 Med Wages', 'Box 14 CA SDI', 'Box 16 CA Wages', 'Box 17 CA WH'],
+    stWidths,
+    { bold: true, size: 8, color: 100, divider: true }
+  );
+  y += 22;
+
+  const stTotals = { box5: 0, box14: 0, box16: 0, box17: 0 };
+  for (const emp of employeesForYear) {
+    const t = yearEndTotals(emp, year);
+    drawRow(
+      [emp.name, emp.employee_id || '—', fmtMoney(t.box5_medicare), fmtMoney(t.box14_ca_sdi), fmtMoney(t.box16_state_wages), fmtMoney(t.box17_state_wh)],
+      stWidths,
+      { divider: true }
+    );
+    stTotals.box5  += t.box5_medicare;
+    stTotals.box14 += t.box14_ca_sdi;
+    stTotals.box16 += t.box16_state_wages;
+    stTotals.box17 += t.box17_state_wh;
+    y += 20;
+  }
+  drawRow(
+    [`Totals (${employeesForYear.length} employees)`, '', fmtMoney(stTotals.box5), fmtMoney(stTotals.box14), fmtMoney(stTotals.box16), fmtMoney(stTotals.box17)],
+    stWidths,
+    { bold: true }
+  );
+  y += 28;
+
+  // ---- Footer notice ----
+  doc.setDrawColor(200);
+  doc.setLineWidth(0.5);
+  doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+  y += 14;
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(9);
+  doc.setTextColor(120);
+  doc.text('How to file:', MARGIN, y);
+  doc.setFont('helvetica', 'normal');
+  y += 12;
+  const lines = [
+    '1. Enter each employee\'s box totals into your tax software (Drake, ProConnect, ATX, etc.) or directly at SSA Business Services Online.',
+    '2. The "Totals" rows are equivalent to the Form W-3 (transmittal) summary.',
+    '3. Verify these totals match Q1–Q4 Form 941 line 2 for federal wages and CA DE 9 for state wages before submitting.',
+    '4. The W-2 PDFs (downloadable per-employee from the Year-End page) are for the employees\' records.',
+  ];
+  for (const line of lines) {
+    const wrapped = doc.splitTextToSize(line, CONTENT_W);
+    for (const w of wrapped) {
+      doc.text(w, MARGIN, y);
+      y += 11;
+    }
+    y += 2;
+  }
+
+  doc.save(`year-end-summary-${year}.pdf`);
+}
 
 // [E-8] Download the specified paystub as a one-page PDF using jsPDF (loaded
 // from CDN via <script> tag in <head>). Renders a clean layout: company
