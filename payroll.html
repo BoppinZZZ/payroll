@@ -890,6 +890,28 @@
         <input type="text" id="emp-form-employee-id" class="emp-form-input" placeholder="E-001" maxlength="20" autocomplete="off" />
         <div class="emp-form-error" id="emp-err-employee-id">Employee ID is required and must be unique.</div>
       </div>
+
+      <!-- [WG-2] Mailing address — used on year-end W-2 forms. All optional;
+           Anna can leave blank now and fill in before December. -->
+      <div class="emp-form-field">
+        <label class="emp-form-label" for="emp-form-street">Street address <span class="emp-form-hint">(optional — used on W-2)</span></label>
+        <input type="text" id="emp-form-street" class="emp-form-input" placeholder="123 Main St" autocomplete="off" />
+      </div>
+      <div class="emp-form-field" style="display:grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px;">
+        <div>
+          <label class="emp-form-label" for="emp-form-city">City</label>
+          <input type="text" id="emp-form-city" class="emp-form-input" placeholder="Los Angeles" autocomplete="off" />
+        </div>
+        <div>
+          <label class="emp-form-label" for="emp-form-state">State</label>
+          <input type="text" id="emp-form-state" class="emp-form-input" placeholder="CA" maxlength="2" style="text-transform:uppercase;" autocomplete="off" />
+        </div>
+        <div>
+          <label class="emp-form-label" for="emp-form-zip">Zip</label>
+          <input type="text" id="emp-form-zip" class="emp-form-input" placeholder="90001" maxlength="10" autocomplete="off" />
+        </div>
+      </div>
+
       <div class="emp-form-field" id="emp-form-active-row" style="margin-bottom:0;">
         <label class="emp-form-checkbox-row" for="emp-form-active">
           <input type="checkbox" id="emp-form-active" checked />
@@ -1397,6 +1419,90 @@ function paystubsInQuarter(emp, year, quarter) {
     yearOfDate(p.end_date) === year &&
     quarterOfDate(p.end_date) === quarter
   );
+}
+
+// --------------------------------------------------------------------------
+// [WG-1] Year-End helpers (W-2 generation foundation)
+// Pure functions that aggregate paystub data by calendar year. Used by the
+// Year-End view (WG-3) and the W-2 PDF generator (WG-4).
+// --------------------------------------------------------------------------
+
+// Active (non-voided) paystubs for this employee in the given calendar year,
+// determined by end_date. Mirrors paystubsInQuarter for consistency.
+function paystubsInYear(emp, year) {
+  return emp.periods.filter(p =>
+    isPaystubActive(p) &&
+    yearOfDate(p.end_date) === year
+  );
+}
+
+// Sorted list of years that have at least one active paystub anywhere in the firm.
+// Used to populate the year selector on the Year-End page.
+function yearsWithPaystubs() {
+  const seen = new Set();
+  STATE.employees.forEach(emp => {
+    emp.periods.forEach(p => {
+      if (!isPaystubActive(p)) return;
+      const y = yearOfDate(p.end_date);
+      if (y != null) seen.add(y);
+    });
+  });
+  return Array.from(seen).sort((a, b) => a - b);
+}
+
+// Compute W-2 box values for one employee for one calendar year.
+//
+// Box mapping (federal):
+//   Box 1  — Wages, tips, other compensation (federal taxable income)
+//   Box 2  — Federal income tax withheld
+//   Box 3  — Social Security wages (subject to SS, capped at ss_wage_base)
+//   Box 4  — Social Security tax withheld
+//   Box 5  — Medicare wages (no cap)
+//   Box 6  — Medicare tax withheld
+// Box mapping (state — California-specific for this firm):
+//   Box 14 — Other (we use this for CA SDI)
+//   Box 15 — State (always "CA" here) + employer's CA account
+//   Box 16 — State wages
+//   Box 17 — State income tax withheld
+//
+// Currently we have no pre-tax deductions, so Box 1, Box 5, and Box 16 all
+// equal total gross. When pre-tax 401(k)/HSA support is added later, Box 1
+// will diverge from Box 3/5 — refactor this helper at that point.
+//
+// Returns zero-filled object if no paystubs in the year (caller can render
+// "no W-2 to issue" instead of erroring).
+function yearEndTotals(emp, year) {
+  const stubs = paystubsInYear(emp, year);
+  const totals = {
+    year,
+    paystub_count: stubs.length,
+    box1_wages:        0,  // federal taxable
+    box2_fed_wh:       0,
+    box3_ss_wages:     0,  // gross capped at ss_wage_base
+    box4_ss_wh:        0,
+    box5_medicare:     0,  // no cap
+    box6_medicare_wh:  0,
+    box14_ca_sdi:      0,
+    box16_state_wages: 0,
+    box17_state_wh:    0,
+  };
+  for (const p of stubs) {
+    const gross = p.gross_pay || 0;
+    totals.box1_wages        += gross;
+    totals.box5_medicare     += gross;
+    totals.box16_state_wages += gross;
+    totals.box2_fed_wh       += (p.taxes && p.taxes.federal)   || 0;
+    totals.box4_ss_wh        += (p.taxes && p.taxes.ss)        || 0;
+    totals.box6_medicare_wh  += (p.taxes && p.taxes.medicare)  || 0;
+    totals.box14_ca_sdi      += (p.taxes && p.taxes.ca_sdi)    || 0;
+    totals.box17_state_wh    += (p.taxes && p.taxes.ca_state)  || 0;
+  }
+  // Box 3 = SS wages subject to FICA. Cap at the year's ss_wage_base. For
+  // current employees nowhere near $176k this is just total gross, but the
+  // cap math protects us if a high earner enters the system.
+  const ssCap = (STATE.tax_rates && STATE.tax_rates.ss_wage_base) || Infinity;
+  totals.box3_ss_wages = Math.min(totals.box1_wages, ssCap);
+  return totals;
 }
 
 // Sum of this employee's gross pay from ACTIVE paystubs with a lower pp AND
@@ -5841,6 +5947,11 @@ function openAddEmployeeModal() {
   document.getElementById("emp-form-avatar").value = "";
   document.getElementById("emp-form-employee-id").value = suggestNextEmployeeId();
   document.getElementById("emp-form-active").checked = true;
+  // [WG-2] Address fields default empty for new employees
+  document.getElementById("emp-form-street").value = "";
+  document.getElementById("emp-form-city").value = "";
+  document.getElementById("emp-form-state").value = "";
+  document.getElementById("emp-form-zip").value = "";
   empAvatarManuallyEdited = false;
 
   // Set header text and submit button for Add mode
@@ -5886,6 +5997,11 @@ function openEditEmployeeModal(empId) {
   document.getElementById("emp-form-rate").value = (emp.hourly_rate != null) ? String(emp.hourly_rate) : "";
   document.getElementById("emp-form-avatar").value = emp.avatar || "";
   document.getElementById("emp-form-employee-id").value = emp.employee_id || "";
+  // [WG-2] Prefill address fields (empty string for any null DB values)
+  document.getElementById("emp-form-street").value = emp.street || "";
+  document.getElementById("emp-form-city").value   = emp.city   || "";
+  document.getElementById("emp-form-state").value  = emp.state  || "";
+  document.getElementById("emp-form-zip").value    = emp.zip    || "";
 
   // Decide whether the avatar is auto-generated (from the CURRENT name) or manually customized.
   // If it matches the auto value, typing a new name will keep it auto-updating (empAvatarManuallyEdited = false).
@@ -6004,6 +6120,11 @@ function submitEmployeeModal() {
   const rateRaw = document.getElementById("emp-form-rate").value.trim();
   const avatarRaw = document.getElementById("emp-form-avatar").value.trim().toUpperCase();
   const employeeIdRaw = document.getElementById("emp-form-employee-id").value.trim();
+  // [WG-2] Address fields — all optional, no validation needed (DB columns are nullable)
+  const streetRaw = document.getElementById("emp-form-street").value.trim();
+  const cityRaw   = document.getElementById("emp-form-city").value.trim();
+  const stateRaw  = document.getElementById("emp-form-state").value.trim().toUpperCase();
+  const zipRaw    = document.getElementById("emp-form-zip").value.trim();
 
   // Validate each field; show/hide error messages independently
   let valid = true;
@@ -6047,7 +6168,11 @@ function submitEmployeeModal() {
   if (!valid) return;  // Stop here — user will fix errors and re-submit
 
   // Dispatch to the correct handler.
-  const fields = { name: nameRaw, title: titleRaw, rate: rateNum, avatar: avatarRaw, employee_id: employeeIdRaw };
+  const fields = {
+    name: nameRaw, title: titleRaw, rate: rateNum, avatar: avatarRaw, employee_id: employeeIdRaw,
+    // [WG-2] Address — passed through unchanged (createEmployee/updateEmployee handle '' → null)
+    street: streetRaw, city: cityRaw, state: stateRaw, zip: zipRaw,
+  };
   if (empModalEditingId === null) {
     // Add mode also needs the Active checkbox value
     fields.active = document.getElementById("emp-form-active").checked;
@@ -6079,6 +6204,11 @@ async function createEmployeeFromForm(fields) {
         hourly_rate: fields.rate,
         avatar:      fields.avatar,
         active:      fields.active,
+        // [WG-2] Address fields — DAL converts '' → null
+        street:      fields.street,
+        city:        fields.city,
+        state:       fields.state,
+        zip:         fields.zip,
       });
       // Build the STATE shape from the cloud row. `periods: []` because a
       // brand-new employee has no paystubs yet — renderEmployees /
@@ -6091,6 +6221,10 @@ async function createEmployeeFromForm(fields) {
         hourly_rate: Number(cloudRow.hourly_rate),
         avatar:      cloudRow.avatar,
         active:      cloudRow.active,
+        street:      cloudRow.street || '',
+        city:        cloudRow.city   || '',
+        state:       cloudRow.state  || '',
+        zip:         cloudRow.zip    || '',
         periods:     [],
       };
     } else {
@@ -6103,6 +6237,10 @@ async function createEmployeeFromForm(fields) {
         hourly_rate: fields.rate,
         avatar:      fields.avatar,
         active:      fields.active,
+        street:      fields.street || '',
+        city:        fields.city   || '',
+        state:       fields.state  || '',
+        zip:         fields.zip    || '',
         periods:     [],
       };
     }
@@ -6172,6 +6310,11 @@ async function applyEmployeeEdit(empId, fields) {
         hourly_rate: newRate,
         avatar:      fields.avatar,
         employee_id: fields.employee_id,
+        // [WG-2] Address fields — DAL converts '' → null
+        street:      fields.street,
+        city:        fields.city,
+        state:       fields.state,
+        zip:         fields.zip,
       });
     }
 
@@ -6183,6 +6326,11 @@ async function applyEmployeeEdit(empId, fields) {
     emp.hourly_rate = newRate;
     emp.avatar      = fields.avatar;
     emp.employee_id = fields.employee_id;
+    // [WG-2] Mirror address into STATE (empty string for '' / null consistency)
+    emp.street      = fields.street || '';
+    emp.city        = fields.city   || '';
+    emp.state       = fields.state  || '';
+    emp.zip         = fields.zip    || '';
 
     saveState(STATE);
     closeAddEmployeeModal();
@@ -6422,9 +6570,10 @@ const DAL = {
   //   // -> [ { employee_id: "E-001", name: "Christopher Chan", ... },
   //   //      { employee_id: "E-002", name: "Annie Cheng", ... } ]
   async getEmployees() {
+    // [WG-2] street/city/state/zip pulled for W-2 mailing address.
     const { data, error } = await supabaseClient
       .from('employees')
-      .select('id, profile_id, employee_id, name, title, hourly_rate, avatar, active')
+      .select('id, profile_id, employee_id, name, title, hourly_rate, avatar, active, street, city, state, zip')
       .order('employee_id', { ascending: true });
 
     if (error) {
@@ -6798,6 +6947,11 @@ const DAL = {
         hourly_rate: N(emp.hourly_rate),
         avatar:      emp.avatar      || '',
         active:      emp.active !== false,   // default true
+        // [WG-2] Mailing address (nullable in DB; map null/undefined to '')
+        street:      emp.street      || '',
+        city:        emp.city        || '',
+        state:       emp.state       || '',
+        zip:         emp.zip         || '',
         periods:     periods,
       };
     });
@@ -7070,6 +7224,7 @@ const DAL = {
 
     // Build the row. Never pass `id` — the DB generates it. Stripping any
     // caller-supplied id prevents accidental collisions with existing rows.
+    // [WG-2] street/city/state/zip are nullable address fields used by W-2.
     const row = {
       employee_id: employeeId,
       name:        name,
@@ -7078,6 +7233,10 @@ const DAL = {
       avatar:      input.avatar != null ? String(input.avatar).trim() : '',
       active:      input.active !== false,   // default true
       profile_id:  input.profile_id || null, // null until auth-linked
+      street:      input.street  != null ? String(input.street).trim() || null : null,
+      city:        input.city    != null ? String(input.city).trim()   || null : null,
+      state:       input.state   != null ? String(input.state).trim()  || null : null,
+      zip:         input.zip     != null ? String(input.zip).trim()    || null : null,
     };
 
     const { data, error } = await supabaseClient
@@ -7119,10 +7278,14 @@ const DAL = {
       throw new Error('updateEmployee: input object is required.');
     }
 
+    // [WG-2] Added street/city/state/zip for W-2 mailing address. They're
+    // nullable on the DB so empty string is normalized to null below.
     const allowed = [
       'employee_id', 'name', 'title',
       'hourly_rate', 'avatar', 'active', 'profile_id',
+      'street', 'city', 'state', 'zip',
     ];
+    const nullableStringFields = new Set(['profile_id', 'street', 'city', 'state', 'zip']);
 
     // Build the row from only the keys that are present in `input`.
     // Trim strings and coerce hourly_rate to Number.
@@ -7133,10 +7296,12 @@ const DAL = {
           row[f] = Number(input[f]);
         } else if (f === 'active') {
           row[f] = !!input[f];               // coerce to strict boolean
-        } else if (f === 'profile_id') {
-          row[f] = input[f] || null;         // '' / undefined -> null
+        } else if (nullableStringFields.has(f)) {
+          // null-safe: '' / undefined / whitespace-only -> null
+          const trimmed = input[f] == null ? '' : String(input[f]).trim();
+          row[f] = trimmed || null;
         } else {
-          // string fields (employee_id, name, title, avatar)
+          // required string fields (employee_id, name, title, avatar)
           row[f] = input[f] == null ? '' : String(input[f]).trim();
         }
       }
