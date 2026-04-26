@@ -152,11 +152,18 @@
   .btn.primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); box-shadow: 0 1px 2px rgba(15, 118, 110, 0.15), 0 4px 12px rgba(15, 118, 110, 0.18); }
   .btn:active { transform: translateY(1px); }
   .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-  .btn.ghost { background: transparent; border-color: transparent; }
+  /* [R-3 fix] Ghost buttons keep transparent backgrounds but show a permanent
+     border in their text color (Edit → teal, Remove → red) so they read as
+     buttons at rest, not just colored text. currentColor picks up whatever
+     `color:` inline style or `.danger` class is applied. */
+  .btn.ghost { background: transparent; border-color: currentColor; }
   .btn.small { padding: 6px 12px; font-size: 13px; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* [R-3 fix] Ghost buttons preserve their colored border on hover (don't
+     fall through to the default .btn:hover which would change to muted gray). */
+  .btn.ghost:hover { background: var(--bg); border-color: currentColor; }
   .btn.ghost.danger { color: var(--red); }
-  .btn.ghost.danger:hover { background: var(--red-soft); }
+  .btn.ghost.danger:hover { background: var(--red-soft); border-color: currentColor; }
 
   /* ---------- Stat cards ---------- */
   .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
