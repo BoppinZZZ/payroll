@@ -300,6 +300,109 @@
   .entry-table tr.today-row td:first-child::after { content: "today"; position: absolute; top: 2px; right: 4px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--primary); font-weight: 700; }
 
   /* ---------- Print / PDF export ---------- */
+  /* ============================================================================
+     [R-4] Mobile responsive layout
+     ----------------------------------------------------------------------------
+     - Sidebar collapses into a slide-in drawer triggered by a hamburger button
+     - Backdrop overlay closes the drawer when tapped
+     - Page header stacks vertically; primary action buttons go full-width
+     - Stats grid drops from 4 to 2 columns
+     - Tables become horizontally scrollable inside their panel
+     ============================================================================ */
+
+  /* Hamburger toggle — hidden on desktop, shown on mobile via media query below */
+  .hamburger-btn {
+    display: none;
+    position: fixed;
+    top: 12px; left: 12px;
+    z-index: 200;
+    width: 42px; height: 42px;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .hamburger-btn:active { transform: scale(0.96); }
+  .hamburger-btn .hb-bars {
+    display: flex; flex-direction: column; gap: 4px; width: 18px;
+  }
+  .hamburger-btn .hb-bars span {
+    height: 2px; background: var(--text); border-radius: 1px;
+  }
+
+  /* Sidebar backdrop — only shown when drawer is open on mobile */
+  .sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(28, 25, 23, 0.4);
+    z-index: 150;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  body.sidebar-open .sidebar-backdrop {
+    display: block;
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    /* Single-column app — sidebar floats over content as a drawer */
+    .app { grid-template-columns: 1fr; }
+
+    /* Sidebar becomes a fixed drawer that slides in from the left */
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0;
+      width: 280px; height: 100vh;
+      z-index: 175;
+      transform: translateX(-100%);
+      transition: transform 0.25s cubic-bezier(.2,.7,.3,1);
+      box-shadow: 0 0 0 rgba(0,0,0,0);
+      overflow-y: auto;
+    }
+    body.sidebar-open .sidebar {
+      transform: translateX(0);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+    }
+
+    /* Show hamburger toggle (uses flex when visible — see base style above) */
+    .hamburger-btn { display: flex; }
+
+    /* Main content: more compact padding, leave room for the hamburger button */
+    .main { padding: 64px 18px 24px; }
+
+    /* Page header stacks: title on top, action buttons below full-width */
+    .page-header { flex-direction: column; align-items: stretch; }
+    .page-header > div:last-child { display: flex; flex-wrap: wrap; gap: 8px; }
+    .page-header .btn { flex: 1 1 auto; justify-content: center; }
+
+    /* Page titles slightly smaller on mobile so they don't wrap awkwardly */
+    .page-title { font-size: 24px; }
+
+    /* Stats grid: 4 cols → 2 cols on tablet, fits comfortably without horizontal scroll */
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+
+    /* Tables get horizontal scroll inside their panel so columns stay readable
+       at original width instead of squeezing into tiny illegible cells */
+    .panel { overflow-x: auto; }
+    .panel table { min-width: 560px; }
+
+    /* Cell padding tightens slightly so more fits per row */
+    th, td { padding: 12px 16px; }
+
+    /* Modal — slightly tighter on mobile */
+    .emp-modal-content { max-width: calc(100vw - 32px); }
+
+    /* Stats grid drops to single column on very narrow phones (≤420px) */
+  }
+
+  @media (max-width: 420px) {
+    .stats-grid { grid-template-columns: 1fr; }
+  }
+
   @media print {
     body { background: white; }
     .sidebar, .page-header, .notice, .company-liability { display: none !important; }
@@ -689,6 +792,13 @@
     </div>
   </div>
 </div>
+
+<!-- [R-4] Hamburger toggle for mobile — only visible at narrow widths via CSS.
+     Tapping it slides the sidebar in. Tapping the backdrop closes it. -->
+<button class="hamburger-btn" type="button" aria-label="Toggle navigation menu" onclick="toggleSidebar()">
+  <span class="hb-bars"><span></span><span></span><span></span></span>
+</button>
+<div class="sidebar-backdrop" onclick="closeSidebar()"></div>
 
 <div class="app" style="display:none">
 
@@ -4928,6 +5038,10 @@ function showView(viewName) {
   main.innerHTML = html;
   main.scrollTop = 0;
   window.scrollTo({ top: 0, behavior: "smooth" });
+
+  // [R-4] Close the mobile sidebar drawer after any navigation so the user
+  // sees the new view immediately. No-op on desktop (body class isn't set).
+  closeSidebar();
 }
 
 function viewPaystub(employeeId, pp) {
@@ -8083,6 +8197,17 @@ function showAppView() {
 function showLoginView() {
   document.querySelector('.app').style.display = 'none';
   document.getElementById('loginView').style.display = '';  // revert to CSS default (flex)
+}
+
+// [R-4] Mobile sidebar drawer toggle. The hamburger button calls
+// toggleSidebar(); the backdrop calls closeSidebar() (clicking outside).
+// We use a body class so CSS can wire both the sidebar's slide-in transform
+// and the backdrop visibility from a single source of truth.
+function toggleSidebar() {
+  document.body.classList.toggle('sidebar-open');
+}
+function closeSidebar() {
+  document.body.classList.remove('sidebar-open');
 }
 
 // [Polish] Toggle helpers for the hydrating overlay — covers the empty
