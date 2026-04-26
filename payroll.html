@@ -49,12 +49,12 @@
     --accent-soft: #FEF3C7;     /* light gold tint */
     --accent-dark: #A16207;     /* darker gold */
 
-    /* ---- Sidebar (dark surface) ---- */
-    --sidebar-bg: #0C2A2A;      /* deep teal, almost black */
-    --sidebar-border: #163838;  /* slightly lighter for dividers in sidebar */
-    --sidebar-hover: #134E4A;   /* hover state for nav items */
-    --sidebar-text: #E6F4F1;    /* light text on dark sidebar */
-    --sidebar-muted: #94A8A4;   /* muted text on sidebar (footer info, sub-labels) */
+    /* ---- Sidebar (light surface — Option A pivot from gloomy dark teal) ---- */
+    --sidebar-bg: #F4F0E8;      /* warm beige, slightly more saturated than main bg */
+    --sidebar-border: #E7E2D8;  /* same as main border — soft cream-gray dividers */
+    --sidebar-hover: #EAE5DA;   /* slightly darker beige tint on nav hover */
+    --sidebar-text: #1C1917;    /* warm charcoal (same as --text — dark on light) */
+    --sidebar-muted: #78716C;   /* warm gray (same as --muted) */
 
     /* ---- Semantic status colors (warmed to match palette) ---- */
     --green: #047857;
@@ -111,17 +111,19 @@
   .brand-logo { width: 36px; height: 36px; background: var(--primary); border-radius: 8px; display: grid; place-items: center; color: white; font-weight: 700; font-size: 17px; }
   .brand-name { font-weight: 600; font-size: 15px; color: white; }
   .brand-sub { font-size: 12px; color: var(--sidebar-muted); margin-top: 2px; }
-  .nav-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; padding: 12px 10px 6px 10px; }
+  .nav-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--sidebar-muted); padding: 12px 10px 6px 10px; }
   .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; color: var(--sidebar-text); font-size: 14px; cursor: pointer; transition: all .15s ease; user-select: none; }
-  .nav-item:hover { background: var(--sidebar-hover); color: white; }
+  /* [R-1 fix] Light sidebar — hover keeps dark text (was white on dark) */
+  .nav-item:hover { background: var(--sidebar-hover); color: var(--sidebar-text); }
+  /* Active stays a teal pill with white text — pops nicely on the light cream sidebar */
   .nav-item.active { background: var(--primary); color: white; }
   .nav-item .icon { width: 18px; text-align: center; opacity: .9; }
   .nav-item.disabled { color: var(--sidebar-muted); cursor: not-allowed; opacity: 0.5; }
   .nav-item.disabled:hover { background: transparent; color: var(--sidebar-muted); }
-  .soon-tag { margin-left: auto; font-size: 10px; background: var(--sidebar-border); padding: 2px 6px; border-radius: 4px; color: var(--sidebar-muted); }
+  .soon-tag { margin-left: auto; font-size: 10px; background: var(--border); padding: 2px 6px; border-radius: 4px; color: var(--sidebar-muted); }
   .sidebar-footer { margin-top: auto; padding: 12px 8px; border-top: 1px solid var(--sidebar-border); font-size: 12px; color: var(--sidebar-muted); }
-  .footer-btn { margin-top: 10px; width: 100%; padding: 8px; font-size: 12px; background: var(--sidebar-hover); color: var(--sidebar-text); border: none; border-radius: 6px; cursor: pointer; font-family: inherit; transition: background .15s ease; }
-  .footer-btn:hover { background: var(--sidebar-border); color: white; }
+  .footer-btn { margin-top: 10px; width: 100%; padding: 8px; font-size: 12px; background: white; color: var(--sidebar-text); border: 1px solid var(--sidebar-border); border-radius: 6px; cursor: pointer; font-family: inherit; transition: all .15s ease; }
+  .footer-btn:hover { background: var(--sidebar-hover); border-color: var(--muted); }
 
   /* ---------- Main ---------- */
   .main { padding: 32px 40px; overflow-y: auto; }
@@ -159,7 +161,7 @@
 
   /* ---------- Table ---------- */
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; padding: 12px 22px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; background: #fafbfd; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { text-align: left; padding: 12px 22px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; background: var(--bg); border-bottom: 1px solid var(--border); white-space: nowrap; }
   td { padding: 14px 22px; border-bottom: 1px solid #f1f5f9; font-size: 15px; font-variant-numeric: tabular-nums; }
   tr:last-child td { border-bottom: none; }
   tr.clickable { cursor: pointer; transition: background 0.1s; }
