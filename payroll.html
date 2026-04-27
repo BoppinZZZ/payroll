@@ -3704,18 +3704,21 @@ function updateDraftTime(employeeId, idx, field, value) {
   if (!entry || !entry.time_entries[idx]) return;
   entry.time_entries[idx][field] = value;
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 function addDraftTime(employeeId) {
   const draft = getDraft();
   draft.entries[employeeId].time_entries.push({ date: "", clock_in: "", clock_out: "", notes: "" });
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 function removeDraftTime(employeeId, idx) {
   const draft = getDraft();
   draft.entries[employeeId].time_entries.splice(idx, 1);
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 
@@ -3725,18 +3728,21 @@ function updateDraftMileage(employeeId, idx, field, value) {
   if (!entry || !entry.mileage_entries[idx]) return;
   entry.mileage_entries[idx][field] = field === "miles" ? (parseFloat(value) || 0) : value;
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 function addDraftMileage(employeeId) {
   const draft = getDraft();
   draft.entries[employeeId].mileage_entries.push({ date: "", miles: 0 });
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 function removeDraftMileage(employeeId, idx) {
   const draft = getDraft();
   draft.entries[employeeId].mileage_entries.splice(idx, 1);
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 
@@ -3746,18 +3752,21 @@ function updateDraftReimb(employeeId, idx, field, value) {
   if (!entry || !entry.reimbursements[idx]) return;
   entry.reimbursements[idx][field] = field === "amount" ? (parseFloat(value) || 0) : value;
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 function addDraftReimb(employeeId) {
   const draft = getDraft();
   draft.entries[employeeId].reimbursements.push({ date: "", description: "", amount: 0 });
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 function removeDraftReimb(employeeId, idx) {
   const draft = getDraft();
   draft.entries[employeeId].reimbursements.splice(idx, 1);
   saveState(STATE);
+  scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 
@@ -3830,6 +3839,52 @@ function queueDraftSync(employeeId) {
   });
   return next;
 }
+
+
+// ----------------------------------------------------------------------------
+// AS-1: DEBOUNCED AUTO-SAVE
+// ----------------------------------------------------------------------------
+// Wraps queueDraftSync with a per-employee debounce timer so drafts get
+// flushed to the cloud ~3 seconds after the user's last keystroke. This
+// fixes the gap where employees (who never switch employees and never
+// navigate to admin-only views) and admins doing a quick refresh would
+// lose all in-progress work because the only sync triggers were "switch
+// employees", "navigate away from Run Payroll", and "click Finalize".
+//
+// Per-employee timers (Map) so concurrent edits to two employees don't
+// stomp on each other. No-ops in dev mode (file://). Uses the existing
+// queueDraftSync chain so serialization and per-employee locking still apply.
+// ----------------------------------------------------------------------------
+const draftAutoSaveTimers = new Map();   // employeeId -> setTimeout id
+
+function scheduleDraftSync(employeeId, delayMs = 3000) {
+  if (!employeeId) return;
+  if (window.location.protocol === 'file:') return;  // Dev mode: no cloud sync
+
+  const existing = draftAutoSaveTimers.get(employeeId);
+  if (existing) clearTimeout(existing);
+
+  const timeoutId = setTimeout(() => {
+    draftAutoSaveTimers.delete(employeeId);
+    queueDraftSync(employeeId)
+      .catch(err => console.error('[AS-1] auto-save draft sync failed:', err));
+  }, delayMs);
+
+  draftAutoSaveTimers.set(employeeId, timeoutId);
+}
+
+// Cancel any pending debounced sync for this employee. Called by finalizePP
+// before its explicit pre-finalize sync so a stale 3s-old debounce doesn't
+// race with the await'd sync.
+function flushDraftSync(employeeId) {
+  if (!employeeId) return;
+  const existing = draftAutoSaveTimers.get(employeeId);
+  if (existing) {
+    clearTimeout(existing);
+    draftAutoSaveTimers.delete(employeeId);
+  }
+}
+
 
 // Sync one employee's draft entry to Supabase: ensure a timesheet row exists
 // for (employee, current pay period), wipe existing child rows, insert fresh
@@ -4683,6 +4738,10 @@ async function finalizePP(employeeId, btnEl) {
       if (!STATE.current_period || !STATE.current_period.pay_period_id) {
         throw new Error('Current pay period has no cloud ID — cannot finalize. Try refreshing the page.');
       }
+
+      // [AS-1] Cancel any pending auto-save debounce for this employee so
+      // it doesn't race with the explicit pre-finalize sync below.
+      flushDraftSync(employeeId);
 
       // Flush draft → cloud before the permanent write.
       await queueDraftSync(employeeId);
