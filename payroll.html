@@ -840,6 +840,46 @@
   body.role-employee .admin-only { display: none !important; }
 
   /* ==========================================================================
+     QC-1 — QUARTER INDICATORS (Current Period widget pill + History grouping)
+     Small pill that sits next to the "Current Pay Period — PP9" title to show
+     which quarter the active period falls in. Same pill style is used inside
+     the History table cells (per-row Quarter column). The History grouping
+     header is a wider row that visually separates Q1, Q2, etc.
+     ========================================================================== */
+  .quarter-pill {
+    display: inline-block;
+    background: var(--accent-soft);
+    color: var(--accent-dark);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .quarter-cell {
+    display: inline-block;
+    background: var(--accent-soft);
+    color: var(--accent-dark);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+  .quarter-section-header td {
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 10px 24px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ==========================================================================
      AS-3 — SAVE STATUS INDICATOR (Run Payroll entry view)
      Small chip showing whether the current draft has been saved to the cloud.
      Four states: saved (default), unsaved (just-typed), saving (sync in
@@ -2178,7 +2218,7 @@ function renderCurrentPeriodWidget() {
     <div class="cpw">
       <div class="cpw-header">
         <div>
-          <div class="cpw-title">Current Pay Period — PP${cp.pp}</div>
+          <div class="cpw-title">Current Pay Period — PP${cp.pp}<span class="quarter-pill" title="Federal Form 941 / CA DE 9 quarter for this period">Q${quarterOfDate(cp.end) || '?'} ${yearOfDate(cp.end) || ''}</span></div>
           <div class="cpw-sub">${formatDate(cp.start)} – ${formatDate(cp.end)} · Pay date ${formatDate(cp.pay_date)}</div>
           <div class="cpw-countdown ${countdownClass}" style="margin-top:6px;">${countdownText}</div>
         </div>
@@ -2631,6 +2671,10 @@ function renderHistory() {
       ? emp.periods
       : emp.periods.filter(isPaystubActive);
 
+    // [QC-1] Track quarter changes between rows so we can insert section
+    // headers ("Q1 2026", "Q2 2026", etc.) above each group. Closure variable
+    // persists across .map iterations because they run in order.
+    let lastQuarterKey = null;
     const periodRows = visiblePeriods.map(p => {
       const taxes = periodTaxes(p);
       const reimbTotal = (p.reimbursement || 0) + (p.mileage_dollars || 0);
@@ -2642,10 +2686,23 @@ function renderHistory() {
       const rowStyle = isVoided
         ? ` style="opacity:0.55; text-decoration:line-through;"`
         : "";
-      return `
+      // [QC-1] Quarter info for the new column + group headers
+      const qNum = quarterOfDate(p.end_date);
+      const qYear = yearOfDate(p.end_date);
+      const quarterKey = `${qYear}-Q${qNum}`;
+      let headerRow = '';
+      if (qNum && quarterKey !== lastQuarterKey) {
+        headerRow = `<tr class="quarter-section-header"><td colspan="9">Q${qNum} ${qYear}</td></tr>`;
+        lastQuarterKey = quarterKey;
+      }
+      const quarterCell = qNum
+        ? `<span class="quarter-cell">Q${qNum}</span>`
+        : '<span style="color:var(--muted); font-size:11px;">—</span>';
+      return `${headerRow}
         <tr class="clickable"${rowStyle} onclick="viewPaystub('${emp.id}', ${p.pp})">
           <td>PP${p.pp}${voidBadge}</td>
           <td>${formatDate(p.end_date)}</td>
+          <td>${quarterCell}</td>
           <td class="num">${(p.total_hours || 0).toFixed(2)}</td>
           <td class="money">${money(p.gross_pay)}</td>
           <td class="money">${money(reimbTotal)}</td>
@@ -2670,9 +2727,9 @@ function renderHistory() {
         </div>
         <table>
           <thead>
-            <tr><th>PP</th><th>End Date</th><th style="text-align:right">Hours</th><th style="text-align:right">Gross</th><th style="text-align:right">Reimb.</th><th style="text-align:right">Taxes</th><th style="text-align:right">Net Pay</th><th></th></tr>
+            <tr><th>PP</th><th>End Date</th><th>Quarter</th><th style="text-align:right">Hours</th><th style="text-align:right">Gross</th><th style="text-align:right">Reimb.</th><th style="text-align:right">Taxes</th><th style="text-align:right">Net Pay</th><th></th></tr>
           </thead>
-          <tbody>${periodRows || `<tr><td colspan="8" class="empty">${historyShowVoided ? "No pay periods yet" : (voidedCount > 0 ? "All pay periods are voided \u2014 click 'Show voided' above to view them" : "No pay periods yet")}</td></tr>`}</tbody>
+          <tbody>${periodRows || `<tr><td colspan="9" class="empty">${historyShowVoided ? "No pay periods yet" : (voidedCount > 0 ? "All pay periods are voided \u2014 click 'Show voided' above to view them" : "No pay periods yet")}</td></tr>`}</tbody>
         </table>
       </div>
     `;
@@ -3329,8 +3386,8 @@ function renderDE88Section(selected) {
   return `
     <div class="tf-form-section">
       <div class="tf-form-section-header">
-        <div class="tf-form-section-title">CA EDD DE 88 — Payroll Tax Deposit</div>
-        <div class="tf-form-section-sub">Quarter ${selected.quarter}, ${selected.year} · ${quarterRange} · Deposit due ${dueDates[selected.quarter]} · Pay via EDD e-Services for Business</div>
+        <div class="tf-form-section-title">CA EDD DE 9 / DE 88 — Quarterly Contribution Return &amp; Deposit</div>
+        <div class="tf-form-section-sub">Quarter ${selected.quarter}, ${selected.year} · ${quarterRange} · Use these numbers for both the DE 9 quarterly return and the DE 88 deposit voucher · Pay via EDD e-Services for Business · Deposit due ${dueDates[selected.quarter]}</div>
       </div>
       ${renderTaxIdStrip("ca_account")}
 
