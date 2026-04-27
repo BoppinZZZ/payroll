@@ -152,6 +152,26 @@
   .btn.primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); box-shadow: 0 1px 2px rgba(15, 118, 110, 0.15), 0 4px 12px rgba(15, 118, 110, 0.18); }
   .btn:active { transform: translateY(1px); }
   .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+  /* [LS-1] Inline button spinner — used during async actions (finalize, save, etc.)
+     so users see visual confirmation that something is happening. Inherits the
+     button's text color so it works on both ghost (dark spinner) and primary
+     (white spinner) buttons. */
+  .btn-spinner {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: btn-spin 0.6s linear infinite;
+    vertical-align: -1px;
+    margin-right: 6px;
+  }
+  @keyframes btn-spin { to { transform: rotate(360deg); } }
+  /* While disabled by setButtonLoading, the button keeps its color (no fade)
+     so the spinner stays readable. The default .btn:disabled has 0.5 opacity
+     which would mute the spinner — we override here. */
+  .btn:disabled.is-loading { opacity: 1; cursor: progress; }
   /* [R-3 fix] Ghost buttons keep transparent backgrounds but show a permanent
      border in their text color (Edit → teal, Remove → red) so they read as
      buttons at rest, not just colored text. currentColor picks up whatever
@@ -3317,9 +3337,9 @@ function renderPaystub(employeeId, pp) {
   //   - Not voided: [Back to History] [Edit] [Void] [Print]
   //   - Voided:     [Back to History] [Restore] [Print]   (Edit hidden so you must Restore first)
   const actionButtons = isVoided
-    ? `<button class="btn admin-only" style="color:var(--primary);" onclick="restorePaystub('${emp.id}', ${p.pp})" title="Restore this voided paystub">Restore</button>`
+    ? `<button class="btn admin-only" style="color:var(--primary);" onclick="restorePaystub('${emp.id}', ${p.pp}, this)" title="Restore this voided paystub">Restore</button>`
     : `<button class="btn admin-only" style="color:var(--primary);" onclick="openEditPaystubModal('${emp.id}', ${p.pp})" title="Edit hours, miles, or reimbursement">Edit</button>
-       <button class="btn admin-only" style="color:var(--red);" onclick="voidPaystub('${emp.id}', ${p.pp})" title="Mark this paystub as voided (soft delete, can be restored)">Void</button>`;
+       <button class="btn admin-only" style="color:var(--red);" onclick="voidPaystub('${emp.id}', ${p.pp}, this)" title="Mark this paystub as voided (soft delete, can be restored)">Void</button>`;
 
   return `
     <div class="page-header">
@@ -4369,7 +4389,7 @@ function renderPreviewPaystub(employeeId) {
   const status = currentPeriodStatus();
   const finalizeDisabled = status.inProgress;
   const finalizeTip = finalizeDisabled ? `PP${period.pp} ends ${formatDate(status.endDate)} — can't finalize yet` : `Finalize PP${period.pp}`;
-  const finalizeAttrs = finalizeDisabled ? `disabled title="${finalizeTip}"` : `onclick="finalizePP('${emp.id}')" title="${finalizeTip}"`;
+  const finalizeAttrs = finalizeDisabled ? `disabled title="${finalizeTip}"` : `onclick="finalizePP('${emp.id}', this)" title="${finalizeTip}"`;
   const statusWord = finalizeDisabled
     ? `<strong style="color:var(--primary)">In progress — ends ${formatDate(status.endDate)}</strong>`
     : `<strong style="color:var(--amber)">Not finalized</strong>`;
@@ -4540,7 +4560,14 @@ function renderPreviewPaystub(employeeId) {
 
 // --------- Finalize handler ---------
 
-async function finalizePP(employeeId) {
+async function finalizePP(employeeId, btnEl) {
+  // [LS-2] Show "Finalizing…" spinner on the button while async work runs.
+  // The button reference comes from `this` in the onclick. On navigation
+  // (viewPaystub / viewDepositSummary), the DOM is replaced and resetButton
+  // becomes a harmless no-op. On error paths it restores the button so the
+  // user can retry.
+  const resetButton = setButtonLoading(btnEl, 'Finalizing…');
+  try {
   const emp = STATE.employees.find(e => e.id === employeeId);
   if (!emp) { alert("Employee not found"); return; }
   const draft = getDraft();
@@ -4704,6 +4731,12 @@ async function finalizePP(employeeId) {
     viewDepositSummary(justFinalizedPP, true);
   } else {
     viewPaystub(employeeId, justFinalizedPP);
+  }
+  } finally {
+    // [LS-2] Reset the button. On nav-paths the button is detached from the
+    // DOM (innerHTML was replaced by viewPaystub/viewDepositSummary), so this
+    // is a no-op visually. On error paths the user can retry from the same button.
+    resetButton();
   }
 }
 
@@ -5913,8 +5946,9 @@ async function submitEditPaystub() {
   }
 
   // --- Apply changes in place (preserves pp, end_date, voided:false, and any future fields) ---
+  // [LS-2] Show "Saving…" spinner on the modal's submit button.
   const btn = document.getElementById("paystub-edit-submit");
-  if (btn) btn.disabled = true;
+  const resetButton = setButtonLoading(btn, 'Saving…');
 
   // [4f-7] Cloud write first — only mutate STATE on success. Dev mode
   // (file://) skips Supabase so offline testing keeps working.
@@ -5966,8 +6000,8 @@ async function submitEditPaystub() {
   } catch (err) {
     console.error('[4f-7] updatePaystub failed:', err);
     alert('Could not save changes: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
-    // Re-enable submit so the user can retry without closing the modal.
-    if (btn) btn.disabled = false;
+  } finally {
+    resetButton();  // [LS-2] always restore button state
   }
 }
 
@@ -6574,7 +6608,7 @@ function downloadPaystubPdf(employeeId, pp) {
   doc.save(filename);
 }
 
-async function voidPaystub(employeeId, pp) {
+async function voidPaystub(employeeId, pp, btnEl) {
   if (!requireAdmin('Void Paystub')) return;
 
   const emp = STATE.employees.find(e => e.id === employeeId);
@@ -6590,6 +6624,9 @@ async function voidPaystub(employeeId, pp) {
     `Voided paystubs are hidden from totals and the history list, but can be ` +
     `restored at any time. They are NOT permanently deleted.`;
   if (!confirm(msg)) return;
+
+  // [LS-2] Show "Voiding…" while the cloud write happens.
+  const resetButton = setButtonLoading(btnEl, 'Voiding…');
 
   // [4f-5] Cloud write first — only mutate STATE on success. Dev mode
   // (file://) skips Supabase so offline testing keeps working.
@@ -6612,10 +6649,12 @@ async function voidPaystub(employeeId, pp) {
   } catch (err) {
     console.error('[4f-5] voidPaystub failed:', err);
     alert('Could not void this paystub: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+  } finally {
+    resetButton();
   }
 }
 
-async function restorePaystub(employeeId, pp) {
+async function restorePaystub(employeeId, pp, btnEl) {
   if (!requireAdmin('Restore Paystub')) return;
 
   const emp = STATE.employees.find(e => e.id === employeeId);
@@ -6629,6 +6668,9 @@ async function restorePaystub(employeeId, pp) {
     `  Net pay: ${money(p.net_pay || 0)}\n\n` +
     `This paystub will be included in totals and history again.`;
   if (!confirm(msg)) return;
+
+  // [LS-2] Show "Restoring…" while the cloud write happens.
+  const resetButton = setButtonLoading(btnEl, 'Restoring…');
 
   // [4f-6] Cloud write first — only mutate STATE on success. Dev mode
   // (file://) skips Supabase so offline testing keeps working.
@@ -6648,6 +6690,8 @@ async function restorePaystub(employeeId, pp) {
   } catch (err) {
     console.error('[4f-6] restorePaystub failed:', err);
     alert('Could not restore this paystub: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+  } finally {
+    resetButton();
   }
 }
 
@@ -6944,9 +6988,11 @@ function submitEmployeeModal() {
 
 // ---- Add mode: create a new employee from validated form fields ----
 async function createEmployeeFromForm(fields) {
-  // Prevent double-submit by disabling the button
+  // [LS-2] Show "Saving…" spinner on the submit button while the cloud write
+  // happens. Replaces the previous plain-disable approach so users see why
+  // the button is unresponsive on slow connections.
   const submitBtn = document.getElementById("emp-form-submit");
-  if (submitBtn) submitBtn.disabled = true;
+  const resetButton = setButtonLoading(submitBtn, 'Saving…');
 
   // [4f-2] In cloud mode, let Supabase generate the UUID. The returned `id`
   // is what future paystubs / pay_periods / timesheets will reference, so
@@ -7015,8 +7061,10 @@ async function createEmployeeFromForm(fields) {
   } catch (err) {
     console.error('[4f-2] createEmployee failed:', err);
     alert('Could not add employee: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
-    // Re-enable the button so the user can fix and retry without closing the modal.
-    if (submitBtn) submitBtn.disabled = false;
+  } finally {
+    // [LS-2] Always restore the button (success path closes the modal, error
+    // path lets the user retry from the same form).
+    resetButton();
   }
 }
 
@@ -7054,12 +7102,11 @@ async function applyEmployeeEdit(empId, fields) {
     }
   }
 
-  // [4f-3] Commit: disable submit button first to prevent double-submit.
-  // In cloud mode write to Supabase and only mutate STATE on success.
-  // In dev mode (file://) skip the cloud call and mutate in-place — matches
-  // pre-4f behavior for offline testing.
+  // [LS-2] Show "Saving…" spinner while the cloud write happens. Replaces
+  // the previous plain-disable approach. Reset is in finally so the button
+  // restores on either success (modal closes anyway) or error (user retries).
   const submitBtn = document.getElementById("emp-form-submit");
-  if (submitBtn) submitBtn.disabled = true;
+  const resetButton = setButtonLoading(submitBtn, 'Saving…');
 
   const isDevMode = window.location.protocol === 'file:';
   try {
@@ -7098,8 +7145,8 @@ async function applyEmployeeEdit(empId, fields) {
   } catch (err) {
     console.error('[4f-3] updateEmployee failed:', err);
     alert('Could not save changes: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
-    // Re-enable the button so the user can fix and retry without closing the modal.
-    if (submitBtn) submitBtn.disabled = false;
+  } finally {
+    resetButton();  // [LS-2] always restore button state
   }
 }
 
@@ -9176,6 +9223,32 @@ function closeSidebar() {
   document.body.classList.remove('sidebar-open');
 }
 
+// [LS-1] Set a button into a "loading" state during an async action. Disables
+// the button, replaces its label with a spinner + loading text, and returns a
+// reset() function the caller invokes in a finally block.
+//
+// Usage:
+//   async function save() {
+//     const reset = setButtonLoading(myBtn, 'Saving…');
+//     try { await DAL.something(); } finally { reset(); }
+//   }
+//
+// Safe with null/undefined buttons — returns a no-op reset.
+function setButtonLoading(btn, loadingText) {
+  if (!btn) return () => {};
+  const originalHTML     = btn.innerHTML;
+  const originalDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.classList.add('is-loading');
+  btn.innerHTML = `<span class="btn-spinner"></span>${loadingText || 'Saving…'}`;
+  return () => {
+    // Idempotent — calling reset twice doesn't bring the spinner back.
+    btn.disabled = originalDisabled;
+    btn.classList.remove('is-loading');
+    btn.innerHTML = originalHTML;
+  };
+}
+
 // [Polish] Toggle helpers for the hydrating overlay — covers the empty
 // dashboard flash between sign-in and hydrate completion. Safe to call
 // multiple times; CSS keeps the state idempotent.
@@ -9215,10 +9288,8 @@ async function sendMagicLink() {
     return;
   }
 
-  // UI: disable button, show in-progress status
-  sendBtn.disabled    = true;
-  const originalText  = sendBtn.textContent;
-  sendBtn.textContent = 'Sending...';
+  // [LS-2] Spinner + "Sending…" while the magic-link API call runs.
+  const resetButton = setButtonLoading(sendBtn, 'Sending…');
   showLoginStatus('info', 'Sending magic link...');
 
   try {
@@ -9241,9 +9312,7 @@ async function sendMagicLink() {
     // Network failures, unexpected exceptions, etc.
     showLoginStatus('error', 'Something went wrong. Please check your internet and try again.');
   } finally {
-    // Re-enable the button in ALL cases so the user can retry if needed
-    sendBtn.disabled    = false;
-    sendBtn.textContent = originalText;
+    resetButton();  // [LS-2] always restore the button
   }
 }
 
