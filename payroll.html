@@ -2218,7 +2218,7 @@ function renderDashboard() {
     <div class="page-header">
       <div>
         <div class="page-title">Dashboard</div>
-        <div class="page-sub">YTD snapshot · ${STATE.employees.length} employees · 2026 tax year</div>
+        <div class="page-sub">YTD snapshot · ${STATE.employees.length} employees · ${new Date().getFullYear()} tax year</div>
       </div>
       <div style="display:flex; gap:8px;">
         <button class="btn admin-only" onclick="exportBackup()" title="Download a JSON snapshot of all data to your Downloads folder">Export backup</button>
@@ -2366,7 +2366,7 @@ function renderEmployeeDashboard() {
     </div>
   ` : `
     <div class="panel" style="padding:40px; text-align:center; color:var(--muted);">
-      No paystubs yet for 2026.
+      No paystubs yet for ${new Date().getFullYear()}.
     </div>
   `;
 
@@ -2378,7 +2378,7 @@ function renderEmployeeDashboard() {
     <div class="page-header">
       <div>
         <div class="page-title">Welcome, ${esc(displayName)}</div>
-        <div class="page-sub">Your payroll dashboard · 2026 tax year</div>
+        <div class="page-sub">Your payroll dashboard · ${new Date().getFullYear()} tax year</div>
       </div>
       <button class="btn primary" onclick="showView('run-payroll')" title="Enter hours for the current pay period">+ Run Payroll</button>
     </div>
@@ -2644,7 +2644,7 @@ function renderHistory() {
     <div class="page-header">
       <div>
         <div class="page-title">Payroll History</div>
-        <div class="page-sub">All completed pay periods · 2026 tax year</div>
+        <div class="page-sub">All completed pay periods · ${new Date().getFullYear()} tax year</div>
       </div>
       ${toggleButton}
     </div>
@@ -5502,7 +5502,7 @@ function renderTaxRates() {
     <div class="page-header">
       <div>
         <div class="page-title">Tax Rates &amp; Caps</div>
-        <div class="page-sub">2026 tax year · used by the paystub calculator</div>
+        <div class="page-sub">${new Date().getFullYear()} tax year · used by the paystub calculator</div>
       </div>
     </div>
 
