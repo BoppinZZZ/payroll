@@ -172,6 +172,74 @@
      so the spinner stays readable. The default .btn:disabled has 0.5 opacity
      which would mute the spinner — we override here. */
   .btn:disabled.is-loading { opacity: 1; cursor: progress; }
+
+  /* [TN-1] Toast notifications — slide-in feedback for async actions.
+     Replaces blocking browser alert() popups for success/info/error messages.
+     Container is fixed top-right; toasts stack vertically with a small gap. */
+  .toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1500;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: none;
+    max-width: calc(100vw - 40px);
+  }
+  .toast {
+    background: white;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: 10px;
+    padding: 12px 14px 12px 16px;
+    min-width: 280px;
+    max-width: 400px;
+    box-shadow: 0 4px 16px rgba(28, 25, 23, 0.08), 0 1px 3px rgba(28, 25, 23, 0.04);
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    pointer-events: auto;
+    animation: toast-slide-in 0.22s cubic-bezier(.2,.7,.3,1);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  /* Variant left-borders use semantic colors */
+  .toast.success { border-left-color: var(--green); }
+  .toast.error   { border-left-color: var(--red); }
+  .toast.warning { border-left-color: var(--amber); }
+  .toast.info    { border-left-color: var(--primary); }
+  .toast-content { flex: 1; min-width: 0; }
+  .toast-title   { font-weight: 500; }
+  .toast-detail  { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .toast-close {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    transition: background 0.15s;
+  }
+  .toast-close:hover { background: var(--bg); color: var(--text); }
+  .toast.exiting { animation: toast-slide-out 0.18s cubic-bezier(.4,.0,.7,.3) forwards; }
+  @keyframes toast-slide-in {
+    from { transform: translateX(20px); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+  }
+  @keyframes toast-slide-out {
+    from { transform: translateX(0);    opacity: 1; }
+    to   { transform: translateX(20px); opacity: 0; }
+  }
+  /* On mobile, toasts span the available width with comfortable insets */
+  @media (max-width: 480px) {
+    .toast-container { left: 12px; right: 12px; top: 12px; max-width: none; }
+    .toast { min-width: 0; max-width: none; }
+  }
   /* [R-3 fix] Ghost buttons keep transparent backgrounds but show a permanent
      border in their text color (Edit → teal, Remove → red) so they read as
      buttons at rest, not just colored text. currentColor picks up whatever
@@ -4578,7 +4646,7 @@ async function finalizePP(employeeId, btnEl) {
   // The buttons are disabled in that case, but this guards console/keyboard paths.
   const status = currentPeriodStatus();
   if (status.inProgress) {
-    alert(`PP${STATE.current_period.pp} is still in progress.\n\nIt ends ${formatDate(status.endDate)} (${status.daysRemaining} day${status.daysRemaining === 1 ? "" : "s"} remaining). You can finalize on or after that date.`);
+    showToast(`PP${STATE.current_period.pp} is still in progress — ends ${formatDate(status.endDate)} (${status.daysRemaining} day${status.daysRemaining === 1 ? "" : "s"} remaining). Finalize on or after that date.`, 'warning', 6000);
     return;
   }
 
@@ -4662,7 +4730,7 @@ async function finalizePP(employeeId, btnEl) {
     saveState(STATE);
   } catch (err) {
     console.error('[4f-8] finalizePP failed:', err);
-    alert('Could not finalize paystub: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+    showToast('Could not finalize paystub — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
     return;
   }
 
@@ -4685,42 +4753,38 @@ async function finalizePP(employeeId, btnEl) {
   const isAdminActor = currentUserRole === 'admin';
 
   if (!isAdminActor) {
-    // Employee path — save only, never roll over. Also skip the deposit
-    // summary routing below (that's admin-facing).
-    alert(
-      `PP${justFinalizedPP} finalized for ${justFinalizedName}.\n` +
-      `Net pay: ${money(justFinalizedNet)}\n\n` +
-      `Your paystub has been saved. Your admin will close the pay period.`
+    // [TN-2] Employee path — save only, never roll over.
+    showToast(
+      `PP${justFinalizedPP} finalized — net pay ${money(justFinalizedNet)}. Your admin will close the pay period.`,
+      'success'
     );
   } else if (allEmployeesFinalizedForCurrentPP()) {
     try {
       const next = await rolloverToNextPeriod();
       rolledOver = true;
-      alert(
-        `PP${justFinalizedPP} finalized for ${justFinalizedName}.\n` +
-        `Net pay: ${money(justFinalizedNet)}\n\n` +
-        `All paystubs done for PP${justFinalizedPP}. Advanced to PP${next.pp} ` +
-        `(${formatDate(next.start)} – ${formatDate(next.end)}, pay date ${formatDate(next.pay_date)}).\n\n` +
-        `Tip: click "Export backup" on the Dashboard to save a snapshot now.`
+      // [TN-2] Success: full period closed + advanced.
+      showToast(
+        `PP${justFinalizedPP} finalized for ${justFinalizedName} — net ${money(justFinalizedNet)}. Advanced to PP${next.pp} (${formatDate(next.start)} – ${formatDate(next.end)}).`,
+        'success',
+        6000  // longer so user can read the rollover detail
       );
     } catch (err) {
       console.error('[4f-9] rolloverToNextPeriod failed:', err);
-      alert(
-        `PP${justFinalizedPP} finalized for ${justFinalizedName}.\n` +
-        `Net pay: ${money(justFinalizedNet)}\n\n` +
-        `Your paystub is saved, but advancing to the next pay period failed:\n` +
-        (err.message || 'unknown error') + '\n\n' +
-        `Refresh the page and try again — the paystub is safe and the rollover will retry cleanly.`
+      // [TN-2] Partial success — paystub saved but rollover failed. Use error
+      // kind so user notices, but message clarifies their data is safe.
+      showToast(
+        `PP${justFinalizedPP} saved for ${justFinalizedName} — but advancing the period failed: ${err.message || 'unknown error'}. Refresh and try again; data is safe.`,
+        'error',
+        8000
       );
       // rolledOver stays false → fall through to viewPaystub below.
     }
   } else {
     const remaining = STATE.employees.filter(e => !e.periods.some(p => p.pp === justFinalizedPP)).length;
-    alert(
-      `PP${justFinalizedPP} finalized for ${justFinalizedName}.\n` +
-      `Net pay: ${money(justFinalizedNet)}\n\n` +
-      `Paystub has been added to History.\n` +
-      `${remaining} more employee${remaining === 1 ? "" : "s"} to finalize for PP${justFinalizedPP}.`
+    // [TN-2] Partial period finalize — show progress toward completion.
+    showToast(
+      `PP${justFinalizedPP} finalized for ${justFinalizedName} — net ${money(justFinalizedNet)}. ${remaining} more employee${remaining === 1 ? "" : "s"} to go.`,
+      'success'
     );
   }
 
@@ -4871,13 +4935,13 @@ function handleImportBackupFile(evt) {
     try {
       parsed = JSON.parse(reader.result);
     } catch (err) {
-      alert("That file isn't valid JSON. Pick a payroll backup file (.json) that was created by this app.");
+      showToast("That file isn't valid JSON. Pick a payroll backup (.json) created by this app.", 'error');
       return;
     }
     // Accept either {data: STATE} (envelope format) or a raw STATE (defensive).
     const incoming = parsed && typeof parsed === "object" && parsed.data ? parsed.data : parsed;
     if (!incoming || typeof incoming !== "object" || !Array.isArray(incoming.employees) || !incoming.current_period || !incoming.tax_rates) {
-      alert("That file doesn't look like a payroll backup (missing employees, current_period, or tax_rates). Import cancelled.");
+      showToast("That file doesn't look like a payroll backup (missing employees, current_period, or tax_rates). Import cancelled.", 'error');
       return;
     }
     const empCount = incoming.employees.length;
@@ -4888,11 +4952,11 @@ function handleImportBackupFile(evt) {
     if (!confirm(msg)) return;
     STATE = incoming;
     saveState(STATE);
-    alert("Backup restored.");
+    showToast('Backup restored.', 'success');
     showView("dashboard");
   };
   reader.onerror = function() {
-    alert("Couldn't read that file. Try again.");
+    showToast("Couldn't read that file. Try again.", 'error');
   };
   reader.readAsText(file);
 }
@@ -5368,7 +5432,7 @@ async function saveCompanyInfo() {
   });
 
   if (changes.length === 0) {
-    alert("Nothing to save — no fields changed.");
+    showToast('Nothing to save — no fields changed.', 'info');
     return;
   }
 
@@ -5408,11 +5472,11 @@ async function saveCompanyInfo() {
     }
     saveState(STATE);
 
-    alert("Company Info saved.");
+    showToast('Company Info saved.', 'success');
     showView("settings");  // re-render so the form reflects the saved values
   } catch (err) {
     console.error('[4f-1] saveCompany failed:', err);
-    alert('Could not save Company Info: ' + (err.message || 'unknown error') + '\n\nYour changes were NOT saved. Please try again.');
+    showToast('Could not save Company Info — ' + (err.message || 'unknown error') + '. Changes were NOT saved; please try again.', 'error');
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -5999,7 +6063,7 @@ async function submitEditPaystub() {
     viewPaystub(employeeId, pp);  // re-render so user sees the updated numbers + "Edited on ..." note
   } catch (err) {
     console.error('[4f-7] updatePaystub failed:', err);
-    alert('Could not save changes: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+    showToast('Could not save changes — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
   } finally {
     resetButton();  // [LS-2] always restore button state
   }
@@ -6026,7 +6090,7 @@ async function submitEditPaystub() {
 // the W-2 to the employee, per our security choice in WG planning.
 function downloadW2Pdf(employeeId, year) {
   if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
-    alert("PDF generator is still loading — please try again in a moment.");
+    showToast('PDF generator is still loading — please try again in a moment.', 'warning');
     return;
   }
 
@@ -6035,7 +6099,7 @@ function downloadW2Pdf(employeeId, year) {
 
   const t = yearEndTotals(emp, year);
   if (t.paystub_count === 0) {
-    alert(`No paystubs for ${emp.name} in ${year} — nothing to put on a W-2.`);
+    showToast(`No paystubs for ${emp.name} in ${year} — nothing to put on a W-2.`, 'warning');
     return;
   }
 
@@ -6208,7 +6272,7 @@ function downloadW2Pdf(employeeId, year) {
 // Business Services Online — every employee on one sheet plus grand totals.
 function downloadYearEndSummaryPdf(year) {
   if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
-    alert("PDF generator is still loading — please try again in a moment.");
+    showToast('PDF generator is still loading — please try again in a moment.', 'warning');
     return;
   }
 
@@ -6216,7 +6280,7 @@ function downloadYearEndSummaryPdf(year) {
     paystubsInYear(emp, year).length > 0
   );
   if (employeesForYear.length === 0) {
-    alert(`No paystubs for ${year} — nothing to summarize.`);
+    showToast(`No paystubs for ${year} — nothing to summarize.`, 'warning');
     return;
   }
 
@@ -6420,7 +6484,7 @@ function downloadPaystubPdf(employeeId, pp) {
   // Guard: jsPDF loads async from CDN. If the user clicks before it's ready,
   // show a friendly message and ask them to try again.
   if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
-    alert("PDF generator is still loading — please try again in a moment.");
+    showToast('PDF generator is still loading — please try again in a moment.', 'warning');
     return;
   }
 
@@ -6648,7 +6712,7 @@ async function voidPaystub(employeeId, pp, btnEl) {
     viewPaystub(employeeId, pp);  // re-render so the VOIDED banner and Restore button appear
   } catch (err) {
     console.error('[4f-5] voidPaystub failed:', err);
-    alert('Could not void this paystub: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+    showToast('Could not void paystub — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
   } finally {
     resetButton();
   }
@@ -6689,7 +6753,7 @@ async function restorePaystub(employeeId, pp, btnEl) {
     viewPaystub(employeeId, pp);  // re-render — banner disappears, Edit/Void buttons return
   } catch (err) {
     console.error('[4f-6] restorePaystub failed:', err);
-    alert('Could not restore this paystub: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+    showToast('Could not restore paystub — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
   } finally {
     resetButton();
   }
@@ -7060,7 +7124,7 @@ async function createEmployeeFromForm(fields) {
     showView("employees");
   } catch (err) {
     console.error('[4f-2] createEmployee failed:', err);
-    alert('Could not add employee: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+    showToast('Could not add employee — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
   } finally {
     // [LS-2] Always restore the button (success path closes the modal, error
     // path lets the user retry from the same form).
@@ -7144,7 +7208,7 @@ async function applyEmployeeEdit(empId, fields) {
     showView("employees");
   } catch (err) {
     console.error('[4f-3] updateEmployee failed:', err);
-    alert('Could not save changes: ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+    showToast('Could not save changes — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
   } finally {
     resetButton();  // [LS-2] always restore button state
   }
@@ -7188,7 +7252,7 @@ async function confirmRemoveEmployee(empId) {
       showView("employees");
     } catch (err) {
       console.error('[4f-4] deactivate employee failed:', err);
-      alert('Could not deactivate ' + emp.name + ': ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+      showToast('Could not deactivate ' + emp.name + ' — ' + (err.message || 'unknown error') + '. Nothing was saved.', 'error');
     }
   } else {
     // [4f-4 fix] No history → still soft-delete (active=false) rather than
@@ -7219,7 +7283,7 @@ async function confirmRemoveEmployee(empId) {
       showView("employees");
     } catch (err) {
       console.error('[4f-4] remove employee (soft-delete) failed:', err);
-      alert('Could not remove ' + emp.name + ': ' + (err.message || 'unknown error') + '\n\nNothing was removed. Please try again.');
+      showToast('Could not remove ' + emp.name + ' — ' + (err.message || 'unknown error') + '. Nothing was removed.', 'error');
     }
   }
 }
@@ -7245,7 +7309,7 @@ async function reactivateEmployee(empId) {
     showView("employees");
   } catch (err) {
     console.error('[4f-4] reactivate employee failed:', err);
-    alert('Could not reactivate ' + emp.name + ': ' + (err.message || 'unknown error') + '\n\nNothing was saved. Please try again.');
+    showToast('Could not reactivate ' + emp.name + ' — ' + (err.message || 'unknown error') + '. Nothing was saved.', 'error');
   }
 }
 
@@ -9249,6 +9313,70 @@ function setButtonLoading(btn, loadingText) {
   };
 }
 
+// [TN-1] Show a slide-in toast notification.
+//
+// Args:
+//   message  — required string. Can include a "Title — detail" structure for
+//              visual emphasis (the part before the em-dash gets bolded).
+//   kind     — 'success' | 'error' | 'warning' | 'info'. Default 'info'.
+//   duration — ms before auto-dismiss. Default 4000 (success/info).
+//              Errors get 6000 by default since users may want to re-read.
+//              Pass 0 to make the toast persist until manually dismissed.
+//
+// Usage:
+//   showToast('PP9 finalized — net pay $1,856.25', 'success');
+//   showToast('Could not save: cloud write failed', 'error');
+//
+// The container is created lazily on first call and shared by all toasts.
+function showToast(message, kind, duration) {
+  if (!message) return;
+  kind = kind || 'info';
+  duration = duration != null ? duration : (kind === 'error' ? 6000 : 4000);
+
+  // Lazy-create the container the first time a toast is shown.
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+
+  // Split "Title — detail" into structured content. Plain messages skip this.
+  const dashIdx = String(message).indexOf(' — ');
+  let titleHtml, detailHtml;
+  if (dashIdx > 0) {
+    titleHtml  = `<div class="toast-title">${esc(message.slice(0, dashIdx))}</div>`;
+    detailHtml = `<div class="toast-detail">${esc(message.slice(dashIdx + 3))}</div>`;
+  } else {
+    titleHtml  = `<div class="toast-title">${esc(message)}</div>`;
+    detailHtml = '';
+  }
+
+  const toast = document.createElement('div');
+  toast.className = 'toast ' + kind;
+  toast.innerHTML = `
+    <div class="toast-content">${titleHtml}${detailHtml}</div>
+    <button class="toast-close" type="button" aria-label="Dismiss">&times;</button>
+  `;
+
+  // Single dismiss path used by both the close button and the auto-dismiss timer.
+  let dismissed = false;
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    toast.classList.add('exiting');
+    setTimeout(() => toast.remove(), 200);
+  };
+
+  toast.querySelector('.toast-close').addEventListener('click', dismiss);
+  container.appendChild(toast);
+
+  if (duration > 0) {
+    setTimeout(dismiss, duration);
+  }
+}
+
 // [Polish] Toggle helpers for the hydrating overlay — covers the empty
 // dashboard flash between sign-in and hydrate completion. Safe to call
 // multiple times; CSS keeps the state idempotent.
@@ -9343,14 +9471,14 @@ async function signOut() {
   try {
     const { error } = await supabaseClient.auth.signOut();
     if (error) {
-      alert('Could not sign out: ' + (error.message || 'unknown error'));
+      showToast('Could not sign out — ' + (error.message || 'unknown error'), 'error');
       return;
     }
     // On successful sign-out, the onAuthStateChange listener from 4b fires
     // with session === null and automatically swaps to the login view.
     // Nothing else to do here.
   } catch (err) {
-    alert('Could not sign out. Please check your internet and try again.');
+    showToast('Could not sign out. Please check your internet and try again.', 'error');
   }
 }
 
