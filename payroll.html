@@ -3936,7 +3936,7 @@ function queueDraftSync(employeeId) {
 // ----------------------------------------------------------------------------
 const draftAutoSaveTimers = new Map();   // employeeId -> setTimeout id
 
-function scheduleDraftSync(employeeId, delayMs = 3000) {
+function scheduleDraftSync(employeeId, delayMs = 500) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: no cloud sync
 
@@ -4014,6 +4014,45 @@ function setSaveStatus(status) {
     el.outerHTML = buildSaveStatusHtml(status);
   }
 }
+
+
+// ----------------------------------------------------------------------------
+// AS-4: TAB-CLOSE / TAB-HIDE PROTECTION
+// ----------------------------------------------------------------------------
+// The 500ms debounce in scheduleDraftSync gives the user near-instant save
+// in the normal flow, but if they type and IMMEDIATELY close the tab or
+// switch apps within 500ms, the timer is killed before it fires.
+//
+// To cover that edge case we listen for two browser events that fire when
+// the page is leaving:
+//   - visibilitychange → tab hidden (mobile background, tab switch, screen lock)
+//   - pagehide          → tab/window closing or navigating away
+//
+// Both call flushAllPendingDraftSyncs which: cancels the debounce timer for
+// any employee with one pending, and immediately fires queueDraftSync. The
+// browser will keep the in-flight fetch running even after the page is gone
+// (most of the time — modern browsers honor a short grace window).
+// ----------------------------------------------------------------------------
+function flushAllPendingDraftSyncs() {
+  // Snapshot keys first because flushDraftSync mutates the map.
+  const pendingEmpIds = Array.from(draftAutoSaveTimers.keys());
+  for (const empId of pendingEmpIds) {
+    flushDraftSync(empId);            // Cancel the debounce timer
+    queueDraftSync(empId)             // Fire the sync immediately
+      .catch(err => console.error('[AS-4] flush sync failed:', err));
+  }
+}
+
+// Attach the listeners once at script load. No removal needed — they live
+// for the lifetime of the page.
+window.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    flushAllPendingDraftSyncs();
+  }
+});
+window.addEventListener('pagehide', () => {
+  flushAllPendingDraftSyncs();
+});
 
 
 // Sync one employee's draft entry to Supabase: ensure a timesheet row exists
