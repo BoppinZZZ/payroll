@@ -3817,6 +3817,31 @@ function refreshRunPayroll() {
 // against Emp A's timesheet.
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// AS-2: TIMEOUT WRAPPER
+// ----------------------------------------------------------------------------
+// Wraps a Promise so it rejects after `ms` if the inner promise hasn't
+// settled. Used by queueDraftSync below to prevent a hung Supabase request
+// from permanently blocking the per-employee sync queue (the symptom we hit
+// where every subsequent auto-save chained onto a stuck promise and also
+// hung). The inner request keeps running in the background — we just stop
+// waiting on it and let the queue move on.
+// ----------------------------------------------------------------------------
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`Timeout: ${label || 'operation'} took longer than ${ms}ms`));
+    }, ms);
+    promise.then(value => {
+      clearTimeout(timeoutId);
+      resolve(value);
+    }).catch(err => {
+      clearTimeout(timeoutId);
+      reject(err);
+    });
+  });
+}
+
 // Per-employee sync lock. Each entry is a promise chain — enqueueing a new
 // sync waits for the prior chain to settle (success OR failure) before
 // running, so we never hit the same cloud rows with concurrent wipe+insert.
@@ -3829,7 +3854,13 @@ function queueDraftSync(employeeId) {
   if (!employeeId) return Promise.resolve();
   const prev = draftSyncInFlight.get(employeeId) || Promise.resolve();
   // .catch(() => {}) absorbs prior-chain failures so this sync still runs.
-  const next = prev.catch(() => {}).then(() => syncDraftToCloud(employeeId));
+  // [AS-2] 30s timeout prevents a single hung sync from locking up the
+  // entire per-employee queue forever. The inner request keeps running
+  // in the background; we just stop waiting on it so the next attempt
+  // can proceed.
+  const next = prev.catch(() => {}).then(() =>
+    withTimeout(syncDraftToCloud(employeeId), 30000, `draft sync for ${employeeId}`)
+  );
   draftSyncInFlight.set(employeeId, next);
   // Clear the lock when this is the latest chain and it finishes.
   next.finally(() => {
