@@ -524,6 +524,27 @@
     .deposit-card { page-break-inside: avoid; border: 1px solid #666 !important; box-shadow: none !important; margin-bottom: 14px !important; }
     .deposit-success-banner { border: 1px solid #065f46 !important; background: white !important; }
     .deposit-print-only { display: block !important; }
+    /* RC-5: Receipts page — print-friendly listing
+       The shared @page rule above (letter, 0.5in margins) covers layout.
+       Here we strip interactive UI and reset colors so rows print cleanly.  */
+    .receipts-print-header { display: block !important; }
+    .receipts-table { border: 1px solid #999 !important; }
+    .receipts-table th { background: #f5f5f5 !important; color: #000 !important; }
+    .receipts-table td { color: #000 !important; }
+    .receipts-table tbody tr:hover { background: white !important; }
+    .receipts-table tfoot td {
+      background: white !important;
+      border-top: 2px solid #000 !important;
+      font-weight: 700;
+    }
+    .receipts-table .btn-link { display: none !important; }
+    .receipts-table .print-only-attached { display: inline !important; }
+    .rcpt-status-pill {
+      background: white !important;
+      border: 1px solid #666 !important;
+    }
+    .rcpt-status-pill.draft     { color: #b45309 !important; border-color: #b45309 !important; }
+    .rcpt-status-pill.finalized { color: #047857 !important; border-color: #047857 !important; }
     @page { size: letter; margin: 0.5in; }
   }
 
@@ -878,6 +899,9 @@
   }
   .rcpt-status-pill.draft     { background: var(--amber-soft);   color: var(--amber); }
   .rcpt-status-pill.finalized { background: var(--green-soft);   color: var(--green); }
+  /* Hidden on screen; revealed inside @media print above. */
+  .receipts-print-header { display: none; }
+  .print-only-attached   { display: none; }
 
   /* ==========================================================================
      RC-2 — RECEIPT FILE CELL (Run Payroll → Reimbursements table)
@@ -5761,8 +5785,10 @@ function renderReceipts() {
     const statusBadge = isCurrent
       ? '<span class="rcpt-status-pill draft">Draft</span>'
       : '<span class="rcpt-status-pill finalized">Finalized</span>';
+    // [RC-5] Two siblings: button visible on screen, span visible only in
+    // print. Neither shows together — CSS toggles via the print media query.
     const receiptCell = r.receipt_file_path
-      ? `<button class="btn-link" onclick="viewReceiptFromCloud('${esc(r.receipt_file_path)}')" title="Open the attached receipt">📎 View</button>`
+      ? `<button class="btn-link" onclick="viewReceiptFromCloud('${esc(r.receipt_file_path)}')" title="Open the attached receipt">📎 View</button><span class="print-only-attached">📎 Attached</span>`
       : '<span style="color:var(--muted); font-size:13px;">— No file</span>';
     return `
       <tr>
@@ -5779,9 +5805,17 @@ function renderReceipts() {
   // Total amount across visible receipts (handy footer, especially for admin).
   const total = data.reduce((s, r) => s + (Number(r.amount) || 0), 0);
 
+  // [RC-5] Print-only banner: the global print stylesheet hides .page-header,
+  // so without this the printed page would have no title at all.
+  const printHeader = `
+    <div class="receipts-print-header" style="padding: 12px 16px; border-bottom: 1px solid #999; margin-bottom: 8px;">
+      <div style="font-size: 18px; font-weight: 700;">Receipts ${isAdmin ? '— All Firm Records' : '— My Records'}</div>
+      <div style="font-size: 11px; color: #555; margin-top: 2px;">Printed ${formatDate(new Date().toISOString().slice(0, 10))}</div>
+    </div>`;
   return `
     ${headerHtml}
     <div class="panel">
+      ${printHeader}
       <table class="receipts-table">
         <thead>
           <tr>
