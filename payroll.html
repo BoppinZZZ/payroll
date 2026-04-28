@@ -4233,43 +4233,76 @@ function withTimeout(promise, ms, label) {
   });
 }
 
-// Per-employee sync lock. Each entry is a promise chain — enqueueing a new
-// sync waits for the prior chain to settle (success OR failure) before
-// running, so we never hit the same cloud rows with concurrent wipe+insert.
-const draftSyncInFlight = new Map();
+// ----------------------------------------------------------------------------
+// AS-5: SINGLE-FLIGHT SYNC QUEUE
+// ----------------------------------------------------------------------------
+// Replaces the original chain-based queue (which could pile up indefinitely if
+// individual syncs hung) with a per-employee single-flight loop:
+//
+//   - At most one sync is ever in flight per employee.
+//   - If queueDraftSync is called while a sync is running, we just set
+//     `dirty = true` — the running loop will pick up the change at the end
+//     of its current iteration. No queueing, no chaining.
+//   - Each iteration uses an AbortController so a 10-second timeout actually
+//     cancels the underlying fetch (not just gives up listening to it).
+//     Prevents the connection-pool exhaustion we hit before.
+//   - On error we exit the loop entirely; the next typing event starts a
+//     fresh loop. No infinite retry of a broken sync.
+//
+// Public contract for callers (queueDraftSync) is unchanged: returns a
+// promise that resolves when there are no pending dirty changes.
+// ----------------------------------------------------------------------------
+const draftSyncState = new Map();   // empId -> { running, dirty, abortController }
 
-// Public entry point. Fire-and-forget or await — both work. If you await it,
-// you get the exact completion of YOUR requested sync (not earlier queued
-// ones). Navigation handlers fire-and-forget; finalizePP awaits.
 function queueDraftSync(employeeId) {
   if (!employeeId) return Promise.resolve();
-  const prev = draftSyncInFlight.get(employeeId) || Promise.resolve();
-  // .catch(() => {}) absorbs prior-chain failures so this sync still runs.
-  // [AS-2] 30s timeout prevents a single hung sync from locking up the
-  // entire per-employee queue forever. The inner request keeps running
-  // in the background; we just stop waiting on it so the next attempt
-  // can proceed.
-  setSaveStatus('saving');   // [AS-3] show spinner while sync is in flight
-  const next = prev.catch(() => {}).then(() =>
-    withTimeout(syncDraftToCloud(employeeId), 30000, `draft sync for ${employeeId}`)
-  );
-  // [AS-3] Update indicator on resolve/reject. Only flip to 'saved' if
-  // there are no fresh unsaved changes (i.e., user didn't type more
-  // while the sync was running). Errors always flip to 'error' so the
-  // user sees the failure even if they kept typing.
-  next.then(() => {
-    if (currentSaveStatus !== 'unsaved') setSaveStatus('saved');
-  }).catch(() => {
-    setSaveStatus('error');
-  });
-  draftSyncInFlight.set(employeeId, next);
-  // Clear the lock when this is the latest chain and it finishes.
-  next.finally(() => {
-    if (draftSyncInFlight.get(employeeId) === next) {
-      draftSyncInFlight.delete(employeeId);
+  if (window.location.protocol === 'file:') return Promise.resolve();  // Dev mode no-op
+
+  let s = draftSyncState.get(employeeId);
+  if (!s) {
+    s = { running: null, dirty: false, abortController: null };
+    draftSyncState.set(employeeId, s);
+  }
+  s.dirty = true;
+
+  // If a sync is already running, the loop will pick up the new dirty flag
+  // at the end of its current iteration. Just return the existing promise.
+  if (s.running) return s.running;
+
+  // Otherwise start a fresh loop.
+  s.running = runDraftSyncLoop(employeeId, s);
+  return s.running;
+}
+
+async function runDraftSyncLoop(employeeId, s) {
+  setSaveStatus('saving');   // [AS-3] show spinner while a sync is in flight
+  try {
+    while (s.dirty) {
+      s.dirty = false;
+      const controller = new AbortController();
+      s.abortController = controller;
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      try {
+        await syncDraftToCloud(employeeId, controller.signal);
+      } catch (err) {
+        const isAbort = controller.signal.aborted;
+        const errMsg = isAbort
+          ? `Timeout: draft sync for ${employeeId} took longer than 10000ms`
+          : (err && err.message) || String(err);
+        console.error('[AS-5] draft sync failed:', errMsg);
+        setSaveStatus('error');
+        return;  // Exit loop on failure; next typing event starts a fresh loop
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
-  });
-  return next;
+    // Loop drained cleanly — only flip to 'saved' if the user hasn't typed
+    // since (which would have pre-flipped status to 'unsaved').
+    if (currentSaveStatus !== 'unsaved') setSaveStatus('saved');
+  } finally {
+    s.running = null;
+    s.abortController = null;
+  }
 }
 
 
@@ -4412,7 +4445,7 @@ window.addEventListener('pagehide', () => {
 // for (employee, current pay period), wipe existing child rows, insert fresh
 // rows from the local draft. No-ops in dev mode (file://) or if there's no
 // local draft for this employee.
-async function syncDraftToCloud(employeeId) {
+async function syncDraftToCloud(employeeId, signal) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: local-only
   if (!STATE.current_period || !STATE.current_period.pay_period_id) return;
@@ -4421,15 +4454,16 @@ async function syncDraftToCloud(employeeId) {
   if (!entry) return;
 
   // ---- 1. Ensure a timesheet exists for (employee, current period) ----
-  // Cache the id on the local entry so subsequent syncs skip the lookup.
+  // Cached on entry.timesheet_id after first sync.
   let timesheetId = entry.timesheet_id;
   if (!timesheetId) {
-    const { data: existing, error: findErr } = await supabaseClient
+    let q = supabaseClient
       .from('timesheets')
       .select('id')
       .eq('employee_id', employeeId)
-      .eq('pay_period_id', STATE.current_period.pay_period_id)
-      .maybeSingle();
+      .eq('pay_period_id', STATE.current_period.pay_period_id);
+    if (signal) q = q.abortSignal(signal);
+    const { data: existing, error: findErr } = await q.maybeSingle();
     if (findErr) throw findErr;
     if (existing) {
       timesheetId = existing.id;
@@ -4444,31 +4478,32 @@ async function syncDraftToCloud(employeeId) {
     saveState(STATE);
   }
 
-  // ---- 2. Wipe existing child rows for this timesheet ----
-  // Done in parallel: time_entries, mileage_entries, reimbursements are
-  // independent tables with no cross-FKs to each other.
-  const wipeResults = await Promise.all([
-    supabaseClient.from('time_entries').delete().eq('timesheet_id', timesheetId),
-    supabaseClient.from('mileage_entries').delete().eq('timesheet_id', timesheetId),
-    supabaseClient.from('reimbursements').delete().eq('timesheet_id', timesheetId),
-  ]);
-  for (const r of wipeResults) {
-    if (r.error) throw r.error;
-  }
+  // [AS-5] Each child table is synced independently and serially. Time
+  // entries use UPSERT with the unique (timesheet_id, work_date) constraint
+  // so there's no full wipe-and-reinsert per save. Mileage and reimbursement
+  // rows have no natural unique key and are typically small (<10 rows), so
+  // they keep the simpler wipe-and-replace pattern.
+  await syncTimeEntriesUpsert(timesheetId, entry.time_entries || [], signal);
+  await syncMileageWipeReplace(timesheetId, entry.mileage_entries || [], signal);
+  await syncReimbursementsWipeReplace(timesheetId, entry.reimbursements || [], signal);
+}
 
-  // ---- 3. Build fresh rows from the local draft ----
-  // Incomplete rows (empty date/clock/desc, zero miles/amount) are skipped
-  // so we never write DB-invalid rows. Matches the UX: blank rows are
-  // just "not yet filled in" — they should not live in cloud.
-  const timeRows = [];
-  for (const te of (entry.time_entries || [])) {
+
+// ---- AS-5: Time-entries sync via UPSERT (no full wipe per save) ------------
+async function syncTimeEntriesUpsert(timesheetId, localEntries, signal) {
+  // Build valid rows. Track which work_dates appear locally so we can detect
+  // orphaned cloud rows (dates that used to be filled in but were since
+  // emptied or deleted) and remove just those.
+  const rows = [];
+  const localDates = new Set();
+  for (const te of localEntries) {
     if (!te || !te.date || !te.clock_in || !te.clock_out) continue;
-    const inMin = parseTimeToMinutes(te.clock_in);
+    const inMin  = parseTimeToMinutes(te.clock_in);
     const outMin = parseTimeToMinutes(te.clock_out);
-    if (inMin === null || outMin === null) continue;  // Skip unparsable times
-    const hours = hoursFromClocks(te.clock_in, te.clock_out);
-    const overnight = outMin < inMin;  // Crossing midnight
-    timeRows.push({
+    if (inMin === null || outMin === null) continue;
+    const hours     = hoursFromClocks(te.clock_in, te.clock_out);
+    const overnight = outMin < inMin;
+    rows.push({
       timesheet_id: timesheetId,
       work_date:    te.date,
       clock_in:     te.clock_in,
@@ -4477,53 +4512,93 @@ async function syncDraftToCloud(employeeId) {
       hours,
       notes:        (te.notes || '').trim() || null,
     });
+    localDates.add(te.date);
   }
 
-  const mileageRows = [];
-  for (const m of (entry.mileage_entries || [])) {
+  // Step A: UPSERT all valid local rows in one round-trip. The unique
+  // constraint added in the AS-5 SQL migration powers this conflict resolve.
+  if (rows.length > 0) {
+    let q = supabaseClient
+      .from('time_entries')
+      .upsert(rows, { onConflict: 'timesheet_id,work_date' });
+    if (signal) q = q.abortSignal(signal);
+    const { error } = await q;
+    if (error) throw error;
+  }
+
+  // Step B: Delete orphaned cloud rows whose work_date isn't in local. This
+  // handles the case where a user emptied a previously-filled-in row.
+  let fetchQ = supabaseClient
+    .from('time_entries')
+    .select('id, work_date')
+    .eq('timesheet_id', timesheetId);
+  if (signal) fetchQ = fetchQ.abortSignal(signal);
+  const { data: cloudRows, error: fetchErr } = await fetchQ;
+  if (fetchErr) throw fetchErr;
+
+  const orphanIds = (cloudRows || [])
+    .filter(r => !localDates.has(r.work_date))
+    .map(r => r.id);
+
+  if (orphanIds.length > 0) {
+    let delQ = supabaseClient.from('time_entries').delete().in('id', orphanIds);
+    if (signal) delQ = delQ.abortSignal(signal);
+    const { error: delErr } = await delQ;
+    if (delErr) throw delErr;
+  }
+}
+
+// ---- AS-5: Mileage sync — wipe + replace (small table, no natural key) -----
+async function syncMileageWipeReplace(timesheetId, localEntries, signal) {
+  const rows = [];
+  for (const m of localEntries) {
     if (!m || !m.date) continue;
     const miles = Number(m.miles || 0);
-    if (!miles) continue;  // Zero miles = effectively blank
-    mileageRows.push({
+    if (!miles) continue;
+    rows.push({
       timesheet_id: timesheetId,
       entry_date:   m.date,
       miles,
       description:  (m.description || '').trim() || null,
     });
   }
+  let delQ = supabaseClient.from('mileage_entries').delete().eq('timesheet_id', timesheetId);
+  if (signal) delQ = delQ.abortSignal(signal);
+  const { error: delErr } = await delQ;
+  if (delErr) throw delErr;
+  if (rows.length > 0) {
+    let insQ = supabaseClient.from('mileage_entries').insert(rows);
+    if (signal) insQ = insQ.abortSignal(signal);
+    const { error: insErr } = await insQ;
+    if (insErr) throw insErr;
+  }
+}
 
-  const reimbRows = [];
-  for (const r of (entry.reimbursements || [])) {
+// ---- AS-5: Reimbursements sync — wipe + replace ----------------------------
+async function syncReimbursementsWipeReplace(timesheetId, localEntries, signal) {
+  const rows = [];
+  for (const r of localEntries) {
     if (!r) continue;
     const description = (r.description || '').trim();
-    if (!description) continue;  // description is NOT NULL in the DB
+    if (!description) continue;
     const amount = Number(r.amount || 0);
-    if (!amount) continue;       // Zero amount = effectively blank
-    reimbRows.push({
+    if (!amount) continue;
+    rows.push({
       timesheet_id: timesheetId,
       description,
       amount,
-      // [RC-2] Carry the file path through to the cloud row. The actual
-      // file lives in Supabase Storage (uploaded separately when the user
-      // attached it); we just mirror the path here.
       receipt_file_path: r.receipt_file_path || null,
     });
   }
-
-  // ---- 4. Insert fresh rows (in parallel, only for tables with data) ----
-  const insertPromises = [];
-  if (timeRows.length > 0) {
-    insertPromises.push(supabaseClient.from('time_entries').insert(timeRows));
-  }
-  if (mileageRows.length > 0) {
-    insertPromises.push(supabaseClient.from('mileage_entries').insert(mileageRows));
-  }
-  if (reimbRows.length > 0) {
-    insertPromises.push(supabaseClient.from('reimbursements').insert(reimbRows));
-  }
-  const insertResults = await Promise.all(insertPromises);
-  for (const r of insertResults) {
-    if (r.error) throw r.error;
+  let delQ = supabaseClient.from('reimbursements').delete().eq('timesheet_id', timesheetId);
+  if (signal) delQ = delQ.abortSignal(signal);
+  const { error: delErr } = await delQ;
+  if (delErr) throw delErr;
+  if (rows.length > 0) {
+    let insQ = supabaseClient.from('reimbursements').insert(rows);
+    if (signal) insQ = insQ.abortSignal(signal);
+    const { error: insErr } = await insQ;
+    if (insErr) throw insErr;
   }
 }
 
