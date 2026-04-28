@@ -840,6 +840,62 @@
   body.role-employee .admin-only { display: none !important; }
 
   /* ==========================================================================
+     RC-2 — RECEIPT FILE CELL (Run Payroll → Reimbursements table)
+     Three visual states for the new "Receipt" column:
+       1. No file yet  → small file picker button
+       2. Uploading…   → spinner + label
+       3. Attached     → paperclip icon + View / Remove links
+     Designed to fit naturally in a table cell — no decorative shadows,
+     compact spacing, matches the existing entry-table aesthetic.
+     ========================================================================== */
+  .receipt-cell { vertical-align: middle; }
+  .receipt-input {
+    font-size: 12px;
+    max-width: 180px;
+    padding: 4px;
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .receipt-input:hover { border-color: var(--primary); color: var(--text); }
+  .receipt-attached {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .receipt-icon {
+    font-size: 14px;
+    line-height: 1;
+  }
+  .receipt-uploading {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--primary);
+    font-style: italic;
+  }
+  .btn-link {
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    color: var(--primary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: underline;
+    font-family: inherit;
+  }
+  .btn-link:hover { color: var(--primary-dark); }
+  .btn-link.receipt-remove { color: var(--red); }
+  .btn-link.receipt-remove:hover { color: #7f1d1d; }
+
+  /* ==========================================================================
      QC-1 — QUARTER INDICATORS (Current Period widget pill + History grouping)
      Small pill that sits next to the "Current Pay Period — PP9" title to show
      which quarter the active period falls in. Same pill style is used inside
@@ -3852,18 +3908,151 @@ function updateDraftReimb(employeeId, idx, field, value) {
 }
 function addDraftReimb(employeeId) {
   const draft = getDraft();
-  draft.entries[employeeId].reimbursements.push({ date: "", description: "", amount: 0 });
+  draft.entries[employeeId].reimbursements.push({ date: "", description: "", amount: 0, receipt_file_path: null });
   saveState(STATE);
   scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
 function removeDraftReimb(employeeId, idx) {
   const draft = getDraft();
+  // [RC-2] If the row had a receipt file attached, fire-and-forget delete it
+  // from Storage so we don't accumulate orphans. Errors are logged but not
+  // surfaced to the user — losing a file is a minor leak; blocking the
+  // remove action would be worse UX.
+  const removed = draft.entries[employeeId].reimbursements[idx];
+  if (removed && removed.receipt_file_path) {
+    DAL.deleteReceiptFile(removed.receipt_file_path).catch(err => {
+      console.warn('[RC-2] failed to delete receipt on row removal:', err);
+    });
+  }
   draft.entries[employeeId].reimbursements.splice(idx, 1);
   saveState(STATE);
   scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
 }
+
+
+// ============================================================================
+// RC-2: RECEIPT FILE HANDLERS
+// ----------------------------------------------------------------------------
+// Wire up the file <input> on each reimbursement row. Three flows:
+//   handleReceiptFileSelect — user picked a file → upload to Storage,
+//                              save the path on the row, sync.
+//   viewReceiptFile          — user clicked "View" → open a fresh signed
+//                              URL in a new tab.
+//   removeReceiptFile        — user clicked "Remove" → delete from Storage,
+//                              clear the path, sync.
+// ============================================================================
+
+const ALLOWED_RECEIPT_TYPES = [
+  'image/jpeg', 'image/jpg', 'image/png', 'image/heic',
+  'image/heif', 'image/webp', 'application/pdf',
+];
+const MAX_RECEIPT_SIZE = 10 * 1024 * 1024;  // 10 MB
+
+// Per-row upload state, so the render can show "Uploading…" without
+// putting transient flags into the persisted STATE. Key: `${empId}-${idx}`.
+const receiptUploadInProgress = new Map();
+
+async function handleReceiptFileSelect(employeeId, idx, fileInput) {
+  const file = fileInput && fileInput.files && fileInput.files[0];
+  if (!file) return;
+
+  // Validate type + size client-side (the bucket also enforces these on the
+  // server, but a client-side check gives a faster, friendlier error).
+  if (!ALLOWED_RECEIPT_TYPES.includes(file.type)) {
+    showToast(`Unsupported file type: ${file.type || 'unknown'}. Use JPEG, PNG, HEIC, WebP, or PDF.`, 'error');
+    fileInput.value = '';
+    return;
+  }
+  if (file.size > MAX_RECEIPT_SIZE) {
+    const mb = (file.size / 1024 / 1024).toFixed(1);
+    showToast(`File too large (${mb} MB). Maximum is 10 MB.`, 'error');
+    fileInput.value = '';
+    return;
+  }
+
+  const draft = getDraft();
+  const entry = draft.entries[employeeId];
+  if (!entry || !entry.reimbursements[idx]) return;
+
+  // Mark as uploading so the render shows a spinner state.
+  const key = `${employeeId}-${idx}`;
+  receiptUploadInProgress.set(key, true);
+  refreshRunPayroll();
+
+  try {
+    const newPath = await DAL.uploadReceiptFile(employeeId, file);
+
+    // If the row already had a file (replacement case), delete the old one
+    // fire-and-forget. Don't await — even if it fails, the new file is
+    // already up and the user shouldn't be blocked.
+    const oldPath = entry.reimbursements[idx].receipt_file_path;
+    if (oldPath && oldPath !== newPath) {
+      DAL.deleteReceiptFile(oldPath).catch(err => {
+        console.warn('[RC-2] failed to delete old receipt during replace:', err);
+      });
+    }
+
+    // Update STATE + trigger sync
+    entry.reimbursements[idx].receipt_file_path = newPath;
+    saveState(STATE);
+    scheduleDraftSync(employeeId);
+    showToast('Receipt uploaded — ' + file.name, 'success');
+  } catch (err) {
+    console.error('[RC-2] receipt upload failed:', err);
+    showToast('Upload failed — ' + (err.message || 'unknown error'), 'error');
+  } finally {
+    receiptUploadInProgress.delete(key);
+    fileInput.value = '';  // Allow re-selecting the same file later
+    refreshRunPayroll();
+  }
+}
+
+async function viewReceiptFile(employeeId, idx) {
+  const draft = getDraft();
+  const entry = draft.entries[employeeId];
+  if (!entry || !entry.reimbursements[idx]) return;
+
+  const path = entry.reimbursements[idx].receipt_file_path;
+  if (!path) {
+    showToast('No receipt attached to this row.', 'warning');
+    return;
+  }
+
+  try {
+    const url = await DAL.getSignedReceiptUrl(path);
+    if (!url) {
+      showToast('Could not open receipt — file may have been deleted.', 'error');
+      return;
+    }
+    window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    console.error('[RC-2] could not get signed URL:', err);
+    showToast('Could not open receipt — ' + (err.message || 'unknown error'), 'error');
+  }
+}
+
+async function removeReceiptFile(employeeId, idx) {
+  const draft = getDraft();
+  const entry = draft.entries[employeeId];
+  if (!entry || !entry.reimbursements[idx]) return;
+
+  const path = entry.reimbursements[idx].receipt_file_path;
+  if (!path) return;
+
+  // Fire-and-forget delete — UI updates immediately even if the cloud
+  // delete fails. Worst case we leak a file, which is minor.
+  DAL.deleteReceiptFile(path).catch(err => {
+    console.warn('[RC-2] failed to delete receipt:', err);
+  });
+
+  entry.reimbursements[idx].receipt_file_path = null;
+  saveState(STATE);
+  scheduleDraftSync(employeeId);
+  refreshRunPayroll();
+}
+
 
 function resetDraft() {
   if (!confirm("Clear all data entered for PP" + STATE.current_period.pp + "? This cannot be undone.")) return;
@@ -4207,6 +4396,10 @@ async function syncDraftToCloud(employeeId) {
       timesheet_id: timesheetId,
       description,
       amount,
+      // [RC-2] Carry the file path through to the cloud row. The actual
+      // file lives in Supabase Storage (uploaded separately when the user
+      // attached it); we just mirror the path here.
+      receipt_file_path: r.receipt_file_path || null,
     });
   }
 
@@ -4443,13 +4636,34 @@ function renderRunPayrollEntry(empId) {
       </tr>`;
   }).join("");
 
-  const reimbRows = entry.reimbursements.map((re, i) => `
+  const reimbRows = entry.reimbursements.map((re, i) => {
+    // [RC-2] Build the receipt cell based on three states: uploading,
+    // attached, or empty.
+    const uploadKey = `${emp.id}-${i}`;
+    const isUploading = receiptUploadInProgress.get(uploadKey) === true;
+    const hasFile = !!re.receipt_file_path;
+    let receiptCell;
+    if (isUploading) {
+      receiptCell = `<span class="receipt-uploading"><span class="save-spinner"></span> Uploading…</span>`;
+    } else if (hasFile) {
+      receiptCell = `
+        <span class="receipt-attached">
+          <span class="receipt-icon" title="Receipt attached">📎</span>
+          <button class="btn-link" onclick="viewReceiptFile('${emp.id}', ${i})" title="Open the attached receipt">View</button>
+          <button class="btn-link receipt-remove" onclick="removeReceiptFile('${emp.id}', ${i})" title="Remove this receipt">Remove</button>
+        </span>`;
+    } else {
+      receiptCell = `<input type="file" class="receipt-input" accept="image/jpeg,image/png,image/heic,image/heif,image/webp,application/pdf,.jpg,.jpeg,.png,.heic,.heif,.webp,.pdf" onchange="handleReceiptFileSelect('${emp.id}', ${i}, this)">`;
+    }
+    return `
     <tr>
       <td><input type="date" value="${esc(re.date)}" onchange="updateDraftReimb('${emp.id}', ${i}, 'date', this.value)" class="cell-input"></td>
       <td><input type="text" value="${esc(re.description)}" placeholder="e.g. Office supplies" onchange="updateDraftReimb('${emp.id}', ${i}, 'description', this.value)" class="cell-input"></td>
       <td><input type="number" step="0.01" min="0" value="${re.amount || ""}" placeholder="0.00" onchange="updateDraftReimb('${emp.id}', ${i}, 'amount', this.value)" class="cell-input"></td>
+      <td class="receipt-cell">${receiptCell}</td>
       <td class="row-actions"><button class="btn-icon" onclick="removeDraftReimb('${emp.id}', ${i})" title="Remove expense">×</button></td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   // "Next Employee" navigation — skip to the next active employee in the list.
   // [E-4] Only meaningful for admins (they iterate through employees). Employees
@@ -4538,10 +4752,11 @@ function renderRunPayrollEntry(empId) {
               <th>Date</th>
               <th>Description</th>
               <th>Amount</th>
+              <th>Receipt</th>
               <th></th>
             </tr>
           </thead>
-          <tbody>${reimbRows || `<tr><td colspan="4" class="empty">No expenses yet</td></tr>`}</tbody>
+          <tbody>${reimbRows || `<tr><td colspan="5" class="empty">No expenses yet</td></tr>`}</tbody>
         </table>
         <button class="btn small" onclick="addDraftReimb('${emp.id}')">+ Add expense</button>
 
@@ -7892,7 +8107,7 @@ const DAL = {
         .in('timesheet_id', timesheetIds),
       supabaseClient
         .from('reimbursements')
-        .select('id, timesheet_id, description, amount')
+        .select('id, timesheet_id, description, amount, receipt_file_path')
         .in('timesheet_id', timesheetIds),
     ]);
 
@@ -7906,6 +8121,66 @@ const DAL = {
       mileageEntries: meRes.data || [],
       reimbursements: reRes.data || [],
     };
+  },
+
+
+  // ---- RC-2: RECEIPT FILE STORAGE -----------------------------------------
+  // Upload, delete, and signed-URL methods for the `receipts` Storage bucket.
+  // Path convention: {employeeId}/{timestamp}_{randomSuffix}.{ext}
+  // The first folder MUST be the employee_id — that's what the RLS policies
+  // (added in RC-1) extract to enforce ownership.
+  // -------------------------------------------------------------------------
+
+  // Upload a single File to the receipts bucket. Returns the storage path
+  // (e.g. "abc-emp-id/1714353623_a8d3f.pdf") so the caller can store it on
+  // the reimbursement row. Throws on failure (RLS denial, file too large,
+  // wrong MIME type, network error).
+  async uploadReceiptFile(employeeId, file) {
+    if (!employeeId) throw new Error('uploadReceiptFile: employeeId required');
+    if (!file)       throw new Error('uploadReceiptFile: file required');
+    if (window.location.protocol === 'file:') return null;  // Dev mode no-op
+
+    // Sanitize extension. Falls back to "bin" if no extension; the bucket's
+    // allowed_mime_types check on the server side is the real safeguard.
+    const dotIdx = file.name.lastIndexOf('.');
+    const ext = dotIdx >= 0 ? file.name.slice(dotIdx + 1).toLowerCase().replace(/[^a-z0-9]/g, '') : 'bin';
+    const timestamp = Date.now();
+    const randomSuffix = Math.random().toString(36).slice(2, 10);
+    const path = `${employeeId}/${timestamp}_${randomSuffix}.${ext}`;
+
+    const { error } = await supabaseClient.storage
+      .from('receipts')
+      .upload(path, file, {
+        contentType: file.type,
+        upsert: false,
+      });
+    if (error) throw error;
+    return path;
+  },
+
+  // Delete a receipt file by storage path. Safe to call with a non-existent
+  // path — Supabase returns success (idempotent). Used when the user removes
+  // a receipt or replaces it with a new file.
+  async deleteReceiptFile(path) {
+    if (!path) return;
+    if (window.location.protocol === 'file:') return;  // Dev mode no-op
+    const { error } = await supabaseClient.storage
+      .from('receipts')
+      .remove([path]);
+    if (error) throw error;
+  },
+
+  // Generate a short-lived signed URL so the user can view/download a
+  // receipt. URL expires after `expiresInSeconds` (default 1 hour). Returns
+  // null if no path was given so callers can `if (!url) return;` cleanly.
+  async getSignedReceiptUrl(path, expiresInSeconds = 3600) {
+    if (!path) return null;
+    if (window.location.protocol === 'file:') return null;
+    const { data, error } = await supabaseClient.storage
+      .from('receipts')
+      .createSignedUrl(path, expiresInSeconds);
+    if (error) throw error;
+    return data && data.signedUrl ? data.signedUrl : null;
   },
 
 
@@ -8223,9 +8498,13 @@ const DAL = {
               description: m.description || '',
             })),
             reimbursements:  (reByTs[ts.id] || []).map(r => ({
-              date:        '',               // cloud doesn't store date; leave blank
-              description: r.description || '',
-              amount:      N(r.amount),
+              date:               '',               // cloud doesn't store date; leave blank
+              description:        r.description || '',
+              amount:             N(r.amount),
+              // [RC-2] Receipt file path (within the 'receipts' bucket).
+              // Null = no file attached. The app generates a fresh signed
+              // URL each time it needs to display/download the file.
+              receipt_file_path:  r.receipt_file_path || null,
             })),
           };
         } else {
