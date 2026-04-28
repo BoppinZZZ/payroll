@@ -840,6 +840,46 @@
   body.role-employee .admin-only { display: none !important; }
 
   /* ==========================================================================
+     RC-3 — RECEIPTS PAGE (sidebar nav: Receipts)
+     Table-based listing of every reimbursement entry (description, amount,
+     PP, status, receipt file). Same row spacing as the History table so
+     pages feel consistent. Status pills (Draft / Finalized) reuse the
+     existing soft-color tokens.
+     ========================================================================== */
+  .receipts-table { width: 100%; border-collapse: collapse; }
+  .receipts-table th,
+  .receipts-table td { padding: 12px 24px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .receipts-table th {
+    text-align: left;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 500;
+    background: var(--bg);
+    white-space: nowrap;
+  }
+  .receipts-table tbody tr:hover { background: var(--bg); }
+  .receipts-table tfoot td {
+    background: var(--bg);
+    border-top: 2px solid var(--text);
+    border-bottom: none;
+    padding-top: 14px;
+  }
+  .rcpt-status-pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-left: 6px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .rcpt-status-pill.draft     { background: var(--amber-soft);   color: var(--amber); }
+  .rcpt-status-pill.finalized { background: var(--green-soft);   color: var(--green); }
+
+  /* ==========================================================================
      RC-2 — RECEIPT FILE CELL (Run Payroll → Reimbursements table)
      Three visual states for the new "Receipt" column:
        1. No file yet  → small file picker button
@@ -1052,6 +1092,9 @@
     <div class="nav-item" data-view="employees"><span class="icon">◆</span> Employees</div>
     <div class="nav-item" data-view="run-payroll"><span class="icon">◆</span> Run Payroll</div>
     <div class="nav-item" data-view="history"><span class="icon">◆</span> History</div>
+    <!-- [RC-3] Receipts: visible to both admin and employee. Admin sees all
+         receipts firm-wide; employee sees only their own (RLS-enforced). -->
+    <div class="nav-item" data-view="receipts"><span class="icon">◆</span> Receipts</div>
     <div class="nav-item admin-only" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
     <!-- [WG-3] Year-End: hosts W-2 forms and annual totals. Admin-only. -->
     <div class="nav-item admin-only" data-view="year-end"><span class="icon">◆</span> Year-End</div>
@@ -5634,6 +5677,182 @@ function setActivityFilter(key, value) {
   showView('activity-log');
 }
 
+// ============================================================================
+// RC-3: RECEIPTS PAGE
+// ----------------------------------------------------------------------------
+// Lists every reimbursement entry (description, amount, pay-period, receipt
+// file) so users have one place to see the detail that no longer appears on
+// the paystub itself. Visible to both admin (sees all) and employee (sees
+// only their own — RLS-enforced).
+//
+// Pattern: showView dispatches to renderReceipts (which returns a loading
+// shell on first visit) and concurrently kicks off loadReceiptsData() to
+// fetch from the cloud. When the fetch resolves, loadReceiptsData re-renders
+// the page in place. Every navigation to Receipts triggers a fresh fetch so
+// the user always sees up-to-date data after adding/removing receipts.
+// ============================================================================
+
+let receiptsPageState = {
+  loading: false,
+  data: null,    // null = never loaded; [] = loaded but empty
+  error: null,
+};
+
+function renderReceipts() {
+  const isAdmin = currentUserRole === 'admin';
+  const headerHtml = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Receipts</div>
+        <div class="page-sub">${isAdmin ? "All firm reimbursement records" : "Your reimbursement records"} · descriptions and receipt files</div>
+      </div>
+      <div style="display:flex; gap:10px;">
+        <button class="btn" onclick="loadReceiptsData()" title="Refresh from cloud">Refresh</button>
+      </div>
+    </div>
+  `;
+
+  if (receiptsPageState.loading) {
+    return `${headerHtml}
+      <div class="panel">
+        <div class="panel-body" style="text-align:center; padding:48px 24px;">
+          <div class="hydrating-spinner" style="margin:0 auto 12px;"></div>
+          <div style="color:var(--muted);">Loading receipts…</div>
+        </div>
+      </div>`;
+  }
+
+  if (receiptsPageState.error) {
+    const msg = (receiptsPageState.error && receiptsPageState.error.message) || 'Unknown error';
+    return `${headerHtml}
+      <div class="panel">
+        <div class="panel-body" style="text-align:center; padding:48px 24px; color:var(--red);">
+          <div style="font-weight:600; margin-bottom:8px;">Could not load receipts</div>
+          <div style="font-size:13px; margin-bottom:16px;">${esc(msg)}</div>
+          <button class="btn" onclick="loadReceiptsData()">Try again</button>
+        </div>
+      </div>`;
+  }
+
+  const data = receiptsPageState.data || [];
+  if (data.length === 0) {
+    return `${headerHtml}
+      <div class="panel">
+        <div class="panel-body" style="text-align:center; padding:48px 24px; color:var(--muted);">
+          <div style="font-weight:600; margin-bottom:6px;">No receipts yet</div>
+          <div style="font-size:14px;">Receipts will appear here once you add reimbursements on Run Payroll.</div>
+        </div>
+      </div>`;
+  }
+
+  // Build employee lookup so we can show names instead of UUIDs.
+  const empById = {};
+  for (const e of (STATE.employees || [])) {
+    empById[e.id] = e;
+  }
+  const currentPp = STATE.current_period && STATE.current_period.pp;
+
+  const rows = data.map(r => {
+    const ts = r.timesheet || {};
+    const pp = ts.pay_period || {};
+    const emp = empById[ts.employee_id];
+    const empName = emp ? emp.name : '(unknown employee)';
+    const isCurrent = pp.pp_number === currentPp;
+    const statusBadge = isCurrent
+      ? '<span class="rcpt-status-pill draft">Draft</span>'
+      : '<span class="rcpt-status-pill finalized">Finalized</span>';
+    const receiptCell = r.receipt_file_path
+      ? `<button class="btn-link" onclick="viewReceiptFromCloud('${esc(r.receipt_file_path)}')" title="Open the attached receipt">📎 View</button>`
+      : '<span style="color:var(--muted); font-size:13px;">— No file</span>';
+    return `
+      <tr>
+        ${isAdmin ? `<td>${esc(empName)}</td>` : ''}
+        <td>${esc(r.description || '')}</td>
+        <td class="money">${money(Number(r.amount) || 0)}</td>
+        <td>PP${pp.pp_number || '?'} ${statusBadge}</td>
+        <td>${pp.end_date ? formatDate(pp.end_date) : '—'}</td>
+        <td>${receiptCell}</td>
+      </tr>
+    `;
+  }).join('');
+
+  // Total amount across visible receipts (handy footer, especially for admin).
+  const total = data.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+
+  return `
+    ${headerHtml}
+    <div class="panel">
+      <table class="receipts-table">
+        <thead>
+          <tr>
+            ${isAdmin ? '<th>Employee</th>' : ''}
+            <th>Description</th>
+            <th style="text-align:right;">Amount</th>
+            <th>Pay Period</th>
+            <th>Period End</th>
+            <th>Receipt</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+        <tfoot>
+          <tr>
+            <td colspan="${isAdmin ? 2 : 1}" style="font-weight:600;">${data.length} receipt${data.length === 1 ? '' : 's'}</td>
+            <td class="money" style="font-weight:600;">${money(total)}</td>
+            <td colspan="3"></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  `;
+}
+
+async function loadReceiptsData() {
+  if (receiptsPageState.loading) return;  // Already loading — ignore re-entry
+  receiptsPageState.loading = true;
+  receiptsPageState.error = null;
+
+  // If user is currently looking at Receipts, re-render to show spinner.
+  if (currentView === 'receipts') {
+    const main = document.getElementById('main-content');
+    if (main) main.innerHTML = renderReceipts();
+  }
+
+  try {
+    const data = await DAL.getAllReimbursementsWithContext();
+    receiptsPageState.data = data;
+    receiptsPageState.loading = false;
+  } catch (err) {
+    console.error('[RC-3] load receipts failed:', err);
+    receiptsPageState.error = err;
+    receiptsPageState.loading = false;
+  }
+
+  // Re-render with loaded data (or error). Skip if user navigated away.
+  if (currentView === 'receipts') {
+    const main = document.getElementById('main-content');
+    if (main) main.innerHTML = renderReceipts();
+  }
+}
+
+// Open a receipt by storage path. Used by both Run Payroll (idx-based) and
+// the Receipts page (path-based, no idx context). Generates a fresh signed
+// URL each call so links don't go stale between sessions.
+async function viewReceiptFromCloud(path) {
+  if (!path) return;
+  try {
+    const url = await DAL.getSignedReceiptUrl(path);
+    if (!url) {
+      showToast('Could not open receipt — file may have been deleted.', 'error');
+      return;
+    }
+    window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    console.error('[RC-3] could not get signed URL:', err);
+    showToast('Could not open receipt — ' + (err.message || 'unknown error'), 'error');
+  }
+}
+
+
 function renderActivityLog() {
   if (currentUserRole !== 'admin') return renderNonAdminStub();
 
@@ -6103,6 +6322,13 @@ function showView(viewName) {
   else if (viewName === "employees") html = renderEmployees();
   else if (viewName === "history") html = renderHistory();
   else if (viewName === "run-payroll") html = renderRunPayroll();
+  else if (viewName === "receipts") {
+    // [RC-3] Receipts page renders a loading shell first, then the async
+    // loader fetches data and re-renders in place. Always re-fetch on
+    // navigation so users see fresh data after editing on Run Payroll.
+    html = renderReceipts();
+    loadReceiptsData();
+  }
   else if (viewName === "tax-filings") html = renderTaxFilings();
   else if (viewName === "year-end") html = renderYearEnd();
   else if (viewName === "activity-log") html = renderActivityLog();
@@ -8181,6 +8407,55 @@ const DAL = {
       .createSignedUrl(path, expiresInSeconds);
     if (error) throw error;
     return data && data.signedUrl ? data.signedUrl : null;
+  },
+
+
+  // ---- RC-3: ALL REIMBURSEMENTS WITH CONTEXT ------------------------------
+  // Fetch every reimbursement row the calling user can see (RLS-enforced),
+  // joined to its parent timesheet and pay_period so the Receipts page can
+  // group by employee and show "PP9 (Draft)" vs "PP8 (Finalized)" status.
+  //
+  // Admin sees all rows; employee sees only their own (filtered at the DB
+  // layer by RLS, not the app — defense in depth).
+  //
+  // Returned shape per row:
+  //   {
+  //     id, description, amount, receipt_file_path, created_at,
+  //     timesheet: {
+  //       id, employee_id,
+  //       pay_period: { pp_number, start_date, end_date, status }
+  //     }
+  //   }
+  // Sorted newest-first by created_at so the Receipts page shows the most
+  // recent activity at the top.
+  // -------------------------------------------------------------------------
+  async getAllReimbursementsWithContext() {
+    if (window.location.protocol === 'file:') return [];  // Dev mode no-op
+    const { data, error } = await supabaseClient
+      .from('reimbursements')
+      .select(`
+        id,
+        description,
+        amount,
+        receipt_file_path,
+        created_at,
+        timesheet:timesheets!inner (
+          id,
+          employee_id,
+          pay_period:pay_periods!inner (
+            pp_number,
+            start_date,
+            end_date,
+            status
+          )
+        )
+      `)
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('DAL.getAllReimbursementsWithContext error:', error);
+      throw error;
+    }
+    return data || [];
   },
 
 
