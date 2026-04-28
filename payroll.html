@@ -904,6 +904,46 @@
   .print-only-attached   { display: none; }
 
   /* ==========================================================================
+     ML-1/ML-3 — MILEAGE PURPOSE FIELD + RECEIPTS TABS
+     Tab buttons toggle between Expenses and Mileage on the Receipts page.
+     The warning icon flags rows missing a documented Location & Purpose.
+     ========================================================================== */
+  .rcpt-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+    padding: 0 4px;
+  }
+  .rcpt-tab {
+    background: none;
+    border: none;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    font-family: inherit;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    margin-bottom: -1px;
+  }
+  .rcpt-tab:hover { color: var(--text); }
+  .rcpt-tab.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+    font-weight: 600;
+  }
+  .mileage-warning {
+    display: inline-block;
+    color: var(--red);
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 6px;
+    cursor: help;
+  }
+
+  /* ==========================================================================
      RC-2 — RECEIPT FILE CELL (Run Payroll → Reimbursements table)
      Three visual states for the new "Receipt" column:
        1. No file yet  → small file picker button
@@ -3951,7 +3991,7 @@ function updateDraftMileage(employeeId, idx, field, value) {
 }
 function addDraftMileage(employeeId) {
   const draft = getDraft();
-  draft.entries[employeeId].mileage_entries.push({ date: "", miles: 0 });
+  draft.entries[employeeId].mileage_entries.push({ date: "", miles: 0, description: "" });
   saveState(STATE);
   scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
@@ -4694,9 +4734,17 @@ function renderRunPayrollEntry(empId) {
 
   const mileageRows = entry.mileage_entries.map((me, i) => {
     const dollars = (me.miles || 0) * STATE.mileage_rate;
+    // [ML-1/ML-4] If miles are entered but the location/purpose is blank,
+    // show a warning so Annie sees what's missing before finalize.
+    const hasMiles = (Number(me.miles) || 0) > 0;
+    const hasPurpose = !!(me.description && me.description.trim());
+    const purposeWarning = (hasMiles && !hasPurpose)
+      ? `<span class="mileage-warning" title="Required: where did you go and why?">⚠</span>`
+      : '';
     return `
       <tr>
         <td><input type="date" value="${esc(me.date)}" onchange="updateDraftMileage('${emp.id}', ${i}, 'date', this.value)" class="cell-input"></td>
+        <td><input type="text" value="${esc(me.description || "")}" placeholder="e.g. Acme Corp — client meeting" onchange="updateDraftMileage('${emp.id}', ${i}, 'description', this.value)" class="cell-input">${purposeWarning}</td>
         <td><input type="number" step="0.1" min="0" value="${me.miles || ""}" placeholder="0" onchange="updateDraftMileage('${emp.id}', ${i}, 'miles', this.value)" class="cell-input"></td>
         <td class="num auto-cell">${money(dollars)}</td>
         <td class="row-actions"><button class="btn-icon" onclick="removeDraftMileage('${emp.id}', ${i})" title="Remove trip">×</button></td>
@@ -4799,16 +4847,18 @@ function renderRunPayrollEntry(empId) {
         <button class="btn small" onclick="addDraftTime('${emp.id}')">+ Add day</button>
 
         <div class="subpanel-label" style="margin-top:24px;">Mileage (${money(STATE.mileage_rate)}/mi)</div>
+        <div class="entry-help">Required: enter the location and business purpose for each trip (e.g. "Acme Corp — client meeting"). The IRS requires documented business purpose for every reimbursed mile.</div>
         <table class="entry-table">
           <thead>
             <tr>
               <th>Date</th>
+              <th>Location &amp; Purpose</th>
               <th>Miles</th>
               <th style="text-align:right">Dollars</th>
               <th></th>
             </tr>
           </thead>
-          <tbody>${mileageRows || `<tr><td colspan="4" class="empty">No trips yet</td></tr>`}</tbody>
+          <tbody>${mileageRows || `<tr><td colspan="5" class="empty">No trips yet</td></tr>`}</tbody>
         </table>
         <button class="btn small" onclick="addDraftMileage('${emp.id}')">+ Add trip</button>
 
@@ -5216,6 +5266,22 @@ async function finalizePP(employeeId, btnEl) {
   const status = currentPeriodStatus();
   if (status.inProgress) {
     showToast(`PP${STATE.current_period.pp} is still in progress — ends ${formatDate(status.endDate)} (${status.daysRemaining} day${status.daysRemaining === 1 ? "" : "s"} remaining). Finalize on or after that date.`, 'warning', 6000);
+    return;
+  }
+
+  // [ML-4] Block finalize if any mileage row has miles > 0 but no
+  // documented Location & Purpose. The IRS requires a business purpose
+  // for every reimbursed mile; finalizing without one risks disallowed
+  // deductions on audit.
+  const missingMileagePurpose = (entry.mileage_entries || []).some(m =>
+    (Number(m.miles) || 0) > 0 && !((m.description || '').trim())
+  );
+  if (missingMileagePurpose) {
+    showToast(
+      'Mileage rows with miles entered must have a Location & Purpose (e.g. "Acme Corp — client meeting"). Fill in the missing rows on Run Payroll, then try Finalize again.',
+      'error',
+      8000
+    );
     return;
   }
 
@@ -5716,23 +5782,42 @@ function setActivityFilter(key, value) {
 // the user always sees up-to-date data after adding/removing receipts.
 // ============================================================================
 
+// [ML-3] Two tabs: Expenses (the original RC-3 receipts list) and Mileage
+// (every reimbursed trip with its documented business purpose). Both tabs
+// fetch in parallel on entry so toggling between them is instant.
 let receiptsPageState = {
   loading: false,
-  data: null,    // null = never loaded; [] = loaded but empty
+  activeTab: 'expenses',     // 'expenses' | 'mileage'
+  expensesData: null,        // null = never loaded; [] = loaded but empty
+  mileageData: null,
   error: null,
 };
 
+function setReceiptsTab(tab) {
+  if (tab !== 'expenses' && tab !== 'mileage') return;
+  receiptsPageState.activeTab = tab;
+  if (currentView === 'receipts') {
+    const main = document.getElementById('main-content');
+    if (main) main.innerHTML = renderReceipts();
+  }
+}
+
 function renderReceipts() {
   const isAdmin = currentUserRole === 'admin';
+  const tab = receiptsPageState.activeTab;
   const headerHtml = `
     <div class="page-header">
       <div>
         <div class="page-title">Receipts</div>
-        <div class="page-sub">${isAdmin ? "All firm reimbursement records" : "Your reimbursement records"} · descriptions and receipt files</div>
+        <div class="page-sub">${isAdmin ? "All firm reimbursement records" : "Your reimbursement records"} · descriptions, mileage logs, and receipt files</div>
       </div>
       <div style="display:flex; gap:10px;">
         <button class="btn" onclick="loadReceiptsData()" title="Refresh from cloud">Refresh</button>
       </div>
+    </div>
+    <div class="rcpt-tabs">
+      <button class="rcpt-tab ${tab === 'expenses' ? 'active' : ''}" onclick="setReceiptsTab('expenses')">Expenses</button>
+      <button class="rcpt-tab ${tab === 'mileage'  ? 'active' : ''}" onclick="setReceiptsTab('mileage')">Mileage</button>
     </div>
   `;
 
@@ -5758,22 +5843,27 @@ function renderReceipts() {
       </div>`;
   }
 
-  const data = receiptsPageState.data || [];
+  // [ML-3] Branch: render the active tab's body.
+  if (tab === 'mileage') {
+    return headerHtml + renderReceiptsMileageBody(isAdmin);
+  }
+  return headerHtml + renderReceiptsExpensesBody(isAdmin);
+}
+
+function renderReceiptsExpensesBody(isAdmin) {
+  const data = receiptsPageState.expensesData || [];
   if (data.length === 0) {
-    return `${headerHtml}
+    return `
       <div class="panel">
         <div class="panel-body" style="text-align:center; padding:48px 24px; color:var(--muted);">
-          <div style="font-weight:600; margin-bottom:6px;">No receipts yet</div>
-          <div style="font-size:14px;">Receipts will appear here once you add reimbursements on Run Payroll.</div>
+          <div style="font-weight:600; margin-bottom:6px;">No expense receipts yet</div>
+          <div style="font-size:14px;">Expenses will appear here once you add reimbursements on Run Payroll.</div>
         </div>
       </div>`;
   }
 
-  // Build employee lookup so we can show names instead of UUIDs.
   const empById = {};
-  for (const e of (STATE.employees || [])) {
-    empById[e.id] = e;
-  }
+  for (const e of (STATE.employees || [])) empById[e.id] = e;
   const currentPp = STATE.current_period && STATE.current_period.pp;
 
   const rows = data.map(r => {
@@ -5809,11 +5899,10 @@ function renderReceipts() {
   // so without this the printed page would have no title at all.
   const printHeader = `
     <div class="receipts-print-header" style="padding: 12px 16px; border-bottom: 1px solid #999; margin-bottom: 8px;">
-      <div style="font-size: 18px; font-weight: 700;">Receipts ${isAdmin ? '— All Firm Records' : '— My Records'}</div>
+      <div style="font-size: 18px; font-weight: 700;">Receipts ${isAdmin ? '(All Firm Records)' : '(My Records)'} - Expenses</div>
       <div style="font-size: 11px; color: #555; margin-top: 2px;">Printed ${formatDate(new Date().toISOString().slice(0, 10))}</div>
     </div>`;
   return `
-    ${headerHtml}
     <div class="panel">
       ${printHeader}
       <table class="receipts-table">
@@ -5830,7 +5919,7 @@ function renderReceipts() {
         <tbody>${rows}</tbody>
         <tfoot>
           <tr>
-            <td colspan="${isAdmin ? 2 : 1}" style="font-weight:600;">${data.length} receipt${data.length === 1 ? '' : 's'}</td>
+            <td colspan="${isAdmin ? 2 : 1}" style="font-weight:600;">${data.length} expense${data.length === 1 ? '' : 's'}</td>
             <td class="money" style="font-weight:600;">${money(total)}</td>
             <td colspan="3"></td>
           </tr>
@@ -5839,6 +5928,92 @@ function renderReceipts() {
     </div>
   `;
 }
+
+// [ML-3] Mileage tab body — same shell as expenses but with date/miles/dollars
+// columns instead of description/amount/file. Flags rows missing the
+// Location & Purpose so Anna can spot them quickly.
+function renderReceiptsMileageBody(isAdmin) {
+  const data = receiptsPageState.mileageData || [];
+  if (data.length === 0) {
+    return `
+      <div class="panel">
+        <div class="panel-body" style="text-align:center; padding:48px 24px; color:var(--muted);">
+          <div style="font-weight:600; margin-bottom:6px;">No mileage logged yet</div>
+          <div style="font-size:14px;">Mileage entries will appear here once you log trips on Run Payroll.</div>
+        </div>
+      </div>`;
+  }
+
+  const empById = {};
+  for (const e of (STATE.employees || [])) empById[e.id] = e;
+  const currentPp = STATE.current_period && STATE.current_period.pp;
+  const mileageRate = STATE.mileage_rate || 0;
+
+  let totalMiles = 0;
+  let totalDollars = 0;
+  const rows = data.map(m => {
+    const ts = m.timesheet || {};
+    const pp = ts.pay_period || {};
+    const emp = empById[ts.employee_id];
+    const empName = emp ? emp.name : '(unknown employee)';
+    const isCurrent = pp.pp_number === currentPp;
+    const statusBadge = isCurrent
+      ? '<span class="rcpt-status-pill draft">Draft</span>'
+      : '<span class="rcpt-status-pill finalized">Finalized</span>';
+    const miles = Number(m.miles) || 0;
+    const dollars = miles * mileageRate;
+    totalMiles += miles;
+    totalDollars += dollars;
+    const purpose = (m.description || '').trim();
+    const purposeCell = purpose
+      ? esc(purpose)
+      : '<span class="mileage-warning" title="Missing Location & Purpose">⚠ Missing</span>';
+    return `
+      <tr>
+        <td>${m.entry_date ? formatDate(m.entry_date) : '-'}</td>
+        ${isAdmin ? `<td>${esc(empName)}</td>` : ''}
+        <td>${purposeCell}</td>
+        <td class="num" style="text-align:right;">${miles.toFixed(1)}</td>
+        <td class="money">${money(dollars)}</td>
+        <td>PP${pp.pp_number || '?'} ${statusBadge}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const printHeader = `
+    <div class="receipts-print-header" style="padding: 12px 16px; border-bottom: 1px solid #999; margin-bottom: 8px;">
+      <div style="font-size: 18px; font-weight: 700;">Receipts ${isAdmin ? '(All Firm Records)' : '(My Records)'} - Mileage</div>
+      <div style="font-size: 11px; color: #555; margin-top: 2px;">Printed ${formatDate(new Date().toISOString().slice(0, 10))}</div>
+    </div>`;
+
+  return `
+    <div class="panel">
+      ${printHeader}
+      <table class="receipts-table">
+        <thead>
+          <tr>
+            <th>Trip Date</th>
+            ${isAdmin ? '<th>Employee</th>' : ''}
+            <th>Location &amp; Purpose</th>
+            <th style="text-align:right;">Miles</th>
+            <th style="text-align:right;">Reimburs.</th>
+            <th>Pay Period</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+        <tfoot>
+          <tr>
+            <td colspan="${isAdmin ? 3 : 2}" style="font-weight:600;">${data.length} trip${data.length === 1 ? '' : 's'}</td>
+            <td class="num" style="text-align:right; font-weight:600;">${totalMiles.toFixed(1)}</td>
+            <td class="money" style="font-weight:600;">${money(totalDollars)}</td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  `;
+}
+
 
 async function loadReceiptsData() {
   if (receiptsPageState.loading) return;  // Already loading — ignore re-entry
@@ -5852,11 +6027,16 @@ async function loadReceiptsData() {
   }
 
   try {
-    const data = await DAL.getAllReimbursementsWithContext();
-    receiptsPageState.data = data;
+    // [ML-3] Fetch both tabs in parallel so toggling between them is instant.
+    const [expensesData, mileageData] = await Promise.all([
+      DAL.getAllReimbursementsWithContext(),
+      DAL.getAllMileageWithContext(),
+    ]);
+    receiptsPageState.expensesData = expensesData;
+    receiptsPageState.mileageData = mileageData;
     receiptsPageState.loading = false;
   } catch (err) {
-    console.error('[RC-3] load receipts failed:', err);
+    console.error('[RC-3/ML-3] load receipts failed:', err);
     receiptsPageState.error = err;
     receiptsPageState.loading = false;
   }
@@ -8487,6 +8667,42 @@ const DAL = {
       .order('created_at', { ascending: false });
     if (error) {
       console.error('DAL.getAllReimbursementsWithContext error:', error);
+      throw error;
+    }
+    return data || [];
+  },
+
+
+  // ---- ML-3: ALL MILEAGE WITH CONTEXT -------------------------------------
+  // Mirror of getAllReimbursementsWithContext but for mileage_entries.
+  // Powers the Mileage tab on the Receipts page so Anna can audit every
+  // reimbursed mile with its documented business purpose. RLS scopes
+  // employees to their own rows; admins see everyone.
+  // -------------------------------------------------------------------------
+  async getAllMileageWithContext() {
+    if (window.location.protocol === 'file:') return [];  // Dev mode no-op
+    const { data, error } = await supabaseClient
+      .from('mileage_entries')
+      .select(`
+        id,
+        entry_date,
+        miles,
+        description,
+        created_at,
+        timesheet:timesheets!inner (
+          id,
+          employee_id,
+          pay_period:pay_periods!inner (
+            pp_number,
+            start_date,
+            end_date,
+            status
+          )
+        )
+      `)
+      .order('entry_date', { ascending: false });
+    if (error) {
+      console.error('DAL.getAllMileageWithContext error:', error);
       throw error;
     }
     return data || [];
