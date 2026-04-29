@@ -4300,6 +4300,15 @@ async function runDraftSyncLoop(employeeId, s) {
           timeoutPromise,
         ]);
       } catch (err) {
+        // [AS-11] If the abort was caused by the tab going hidden (the
+        // visibilitychange handler aborts in-flight syncs to avoid the
+        // background-tab hang), treat as deferred — the visible-handler
+        // will restart this sync when the tab returns. Don't surface as
+        // a visible error; just keep dirty=true so the restart kicks in.
+        if (document.visibilityState === 'hidden') {
+          s.dirty = true;
+          return;
+        }
         const errMsg = (err && err.message) || String(err);
         console.error('[AS-5] draft sync failed:', errMsg);
         setSaveStatus('error');
@@ -4444,11 +4453,35 @@ function flushAllPendingDraftSyncs() {
 
 // Attach the listeners once at script load. No removal needed — they live
 // for the lifetime of the page.
+// [AS-11] Tab-visibility handling — fixes the "switched to Excel and came
+// back, save is now stuck" bug. Background tabs throttle JS execution and
+// network callbacks; in-flight Supabase fetches can hang indefinitely
+// while the tab is hidden, leaving the save loop wedged. Solution: ABORT
+// any in-flight sync when the tab goes hidden, and RESTART when it returns.
 window.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
+    // Tab is going to background. Abort any in-flight sync so it doesn't
+    // hang in a throttled state. The runDraftSyncLoop catch handler
+    // detects 'hidden' and exits cleanly with dirty=true preserved.
+    for (const [, s] of draftSyncState) {
+      if (s.abortController && !s.abortController.signal.aborted) {
+        s.abortController.abort();
+      }
+    }
+  } else if (document.visibilityState === 'visible') {
+    // Tab is back. Flush any pending debounce timers (their saves
+    // wouldn't have fired reliably while hidden), then restart any
+    // sync that has dirty work pending.
     flushAllPendingDraftSyncs();
+    for (const [empId, s] of draftSyncState) {
+      if (s.dirty && !s.running) {
+        queueDraftSync(empId)
+          .catch(err => console.error('[AS-11] resume sync failed:', err));
+      }
+    }
   }
 });
+
 window.addEventListener('pagehide', () => {
   flushAllPendingDraftSyncs();
 });
