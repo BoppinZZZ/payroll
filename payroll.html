@@ -4279,16 +4279,12 @@ async function runDraftSyncLoop(employeeId, s) {
   try {
     while (s.dirty) {
       s.dirty = false;
-      // [AS-7/AS-8] Bulletproof 30s timeout via Promise.race. AbortController
-      // tries to cancel the underlying fetch (best effort — Supabase JS
-      // doesn't always honor it across every operation type). Promise.race
-      // guarantees the await rejects after 30s regardless, so the loop
-      // can't hang on "Saving…" forever.
-      //
-      // 30s (not 10s): Supabase free-tier projects pause after idle and the
-      // first request after wake-up can take 15-25s. 30s covers that comfortably
-      // while still surfacing real hangs as errors.
-      const SYNC_TIMEOUT_MS = 30000;
+      // [AS-7/AS-8/AS-9] Bulletproof 60s timeout via Promise.race. AbortController
+      // tries to cancel the underlying fetch (best effort). Promise.race
+      // guarantees the await rejects after 60s regardless, so the loop
+      // can't hang on "Saving…" forever. AS-9 also adds a keepalive ping
+      // (below) to prevent dormancy from causing slow first-syncs at all.
+      const SYNC_TIMEOUT_MS = 60000;
       const controller = new AbortController();
       s.abortController = controller;
       let timeoutId;
@@ -4488,6 +4484,34 @@ window.addEventListener('beforeunload', (e) => {
     return 'Changes you made may not be saved.';
   }
 });
+
+
+// ----------------------------------------------------------------------------
+// AS-9: SUPABASE KEEPALIVE
+// ----------------------------------------------------------------------------
+// Some hosted Postgres setups (including Supabase) get slow on the first
+// request after a quiet stretch — connection pools spin down, query plans
+// get evicted from cache, etc. The first save after a few minutes of
+// inactivity can take 30+ seconds. This isn't dormancy in the formal sense,
+// but the user-visible symptom is the same.
+//
+// Mitigation: every 4 minutes while the tab is open, fire a tiny SELECT
+// against a small reference table. Keeps connections warm and the project
+// hot, so user saves stay sub-second. Skip if the tab is hidden (no point
+// pinging while user is in another app) or in dev mode.
+// ----------------------------------------------------------------------------
+const KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;   // 4 minutes
+setInterval(() => {
+  if (window.location.protocol === 'file:') return;       // Dev mode
+  if (document.visibilityState === 'hidden') return;      // Tab not active
+  if (typeof supabaseClient === 'undefined') return;      // Not initialized
+  supabaseClient
+    .from('tax_rates')
+    .select('year')
+    .limit(1)
+    .then(() => {})   // Fire-and-forget; errors are intentionally swallowed
+    .catch(() => {});
+}, KEEPALIVE_INTERVAL_MS);
 
 
 // Sync one employee's draft entry to Supabase: ensure a timesheet row exists
