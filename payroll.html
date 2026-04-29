@@ -4279,19 +4279,24 @@ async function runDraftSyncLoop(employeeId, s) {
   try {
     while (s.dirty) {
       s.dirty = false;
-      // [AS-7] Bulletproof 10s timeout via Promise.race. AbortController
+      // [AS-7/AS-8] Bulletproof 30s timeout via Promise.race. AbortController
       // tries to cancel the underlying fetch (best effort — Supabase JS
       // doesn't always honor it across every operation type). Promise.race
-      // guarantees the await rejects after 10s regardless, so the loop
+      // guarantees the await rejects after 30s regardless, so the loop
       // can't hang on "Saving…" forever.
+      //
+      // 30s (not 10s): Supabase free-tier projects pause after idle and the
+      // first request after wake-up can take 15-25s. 30s covers that comfortably
+      // while still surfacing real hangs as errors.
+      const SYNC_TIMEOUT_MS = 30000;
       const controller = new AbortController();
       s.abortController = controller;
       let timeoutId;
       const timeoutPromise = new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
           controller.abort();   // attempt cancel
-          reject(new Error(`Timeout: draft sync for ${employeeId} took longer than 10000ms`));
-        }, 10000);
+          reject(new Error(`Timeout: draft sync for ${employeeId} took longer than ${SYNC_TIMEOUT_MS}ms`));
+        }, SYNC_TIMEOUT_MS);
       });
       try {
         await Promise.race([
