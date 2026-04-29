@@ -4322,7 +4322,7 @@ async function runDraftSyncLoop(employeeId, s) {
 // ----------------------------------------------------------------------------
 const draftAutoSaveTimers = new Map();   // employeeId -> setTimeout id
 
-function scheduleDraftSync(employeeId, delayMs = 500) {
+function scheduleDraftSync(employeeId, delayMs = 0) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: no cloud sync
 
@@ -4438,6 +4438,38 @@ window.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => {
   flushAllPendingDraftSyncs();
+});
+
+// ----------------------------------------------------------------------------
+// AS-6: BROWSER-LEVEL UNLOAD GUARD
+// ----------------------------------------------------------------------------
+// Prevents the "I refreshed before the save finished" data-loss path. If
+// there are pending draft changes (debounce timer queued OR a sync currently
+// running) when the user tries to refresh / close the tab / navigate away,
+// the browser shows its built-in "Reload site? Changes may not be saved."
+// dialog. Same UX pattern as Google Docs / Notion / GitHub.
+//
+// Returning a non-empty string (or setting returnValue) is what tells the
+// browser to show the prompt. The actual text is overridden by the browser
+// for security; ours is a fallback for very old browsers only.
+// ----------------------------------------------------------------------------
+function hasPendingDraftChanges() {
+  // A pending debounce timer means typed-but-not-yet-synced changes.
+  if (draftAutoSaveTimers.size > 0) return true;
+  // A running sync loop with dirty=true means the loop is mid-flight or
+  // queued for another iteration.
+  for (const [, s] of draftSyncState) {
+    if (s.running || s.dirty) return true;
+  }
+  return false;
+}
+
+window.addEventListener('beforeunload', (e) => {
+  if (hasPendingDraftChanges()) {
+    e.preventDefault();
+    e.returnValue = 'Changes you made may not be saved.';   // legacy fallback
+    return 'Changes you made may not be saved.';
+  }
 });
 
 
