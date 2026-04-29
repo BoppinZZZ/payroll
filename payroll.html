@@ -4636,13 +4636,14 @@ async function syncDraftToCloud(employeeId, signal) {
 }
 
 
-// ---- AS-5: Time-entries sync via UPSERT (no full wipe per save) ------------
+// ---- LF-2: Time-entries sync via wipe-and-insert -------------------------
+// The earlier UPSERT design assumed one row per day, but real-world
+// timesheets have multi-shift days (e.g. 12:30-4:30 PM AND 10:00 PM-midnight
+// on the same date). Drops the unique-per-day constraint and reverts to
+// wipe-and-insert. Still fast because the AS-10 RLS fix made the underlying
+// queries cheap.
 async function syncTimeEntriesUpsert(timesheetId, localEntries, signal) {
-  // Build valid rows. Track which work_dates appear locally so we can detect
-  // orphaned cloud rows (dates that used to be filled in but were since
-  // emptied or deleted) and remove just those.
   const rows = [];
-  const localDates = new Set();
   for (const te of localEntries) {
     if (!te || !te.date || !te.clock_in || !te.clock_out) continue;
     const inMin  = parseTimeToMinutes(te.clock_in);
@@ -4659,43 +4660,22 @@ async function syncTimeEntriesUpsert(timesheetId, localEntries, signal) {
       hours,
       notes:        (te.notes || '').trim() || null,
     });
-    localDates.add(te.date);
   }
 
-  // Step A: UPSERT all valid local rows in one round-trip.
-  console.log(`[diag-AS]   te.upsert (${rows.length} rows) START`);
+  console.log(`[diag-AS]   te.wipe START`);
+  let delQ = supabaseClient.from('time_entries').delete().eq('timesheet_id', timesheetId);
+  if (signal) delQ = delQ.abortSignal(signal);
+  const { error: delErr } = await delQ;
+  if (delErr) throw delErr;
+  console.log(`[diag-AS]   te.wipe DONE`);
+
   if (rows.length > 0) {
-    let q = supabaseClient
-      .from('time_entries')
-      .upsert(rows, { onConflict: 'timesheet_id,work_date' });
-    if (signal) q = q.abortSignal(signal);
-    const { error } = await q;
-    if (error) throw error;
-  }
-  console.log(`[diag-AS]   te.upsert DONE`);
-
-  // Step B: Delete orphaned cloud rows whose work_date isn't in local.
-  console.log(`[diag-AS]   te.orphan-select START`);
-  let fetchQ = supabaseClient
-    .from('time_entries')
-    .select('id, work_date')
-    .eq('timesheet_id', timesheetId);
-  if (signal) fetchQ = fetchQ.abortSignal(signal);
-  const { data: cloudRows, error: fetchErr } = await fetchQ;
-  if (fetchErr) throw fetchErr;
-  console.log(`[diag-AS]   te.orphan-select DONE (${(cloudRows || []).length} cloud rows)`);
-
-  const orphanIds = (cloudRows || [])
-    .filter(r => !localDates.has(r.work_date))
-    .map(r => r.id);
-
-  if (orphanIds.length > 0) {
-    console.log(`[diag-AS]   te.orphan-delete (${orphanIds.length} rows) START`);
-    let delQ = supabaseClient.from('time_entries').delete().in('id', orphanIds);
-    if (signal) delQ = delQ.abortSignal(signal);
-    const { error: delErr } = await delQ;
-    if (delErr) throw delErr;
-    console.log(`[diag-AS]   te.orphan-delete DONE`);
+    console.log(`[diag-AS]   te.insert (${rows.length} rows) START`);
+    let insQ = supabaseClient.from('time_entries').insert(rows);
+    if (signal) insQ = insQ.abortSignal(signal);
+    const { error: insErr } = await insQ;
+    if (insErr) throw insErr;
+    console.log(`[diag-AS]   te.insert DONE`);
   }
 }
 
