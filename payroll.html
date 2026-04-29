@@ -4279,26 +4279,38 @@ async function runDraftSyncLoop(employeeId, s) {
   try {
     while (s.dirty) {
       s.dirty = false;
+      // [AS-7] Bulletproof 10s timeout via Promise.race. AbortController
+      // tries to cancel the underlying fetch (best effort — Supabase JS
+      // doesn't always honor it across every operation type). Promise.race
+      // guarantees the await rejects after 10s regardless, so the loop
+      // can't hang on "Saving…" forever.
       const controller = new AbortController();
       s.abortController = controller;
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      let timeoutId;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();   // attempt cancel
+          reject(new Error(`Timeout: draft sync for ${employeeId} took longer than 10000ms`));
+        }, 10000);
+      });
       try {
-        await syncDraftToCloud(employeeId, controller.signal);
+        await Promise.race([
+          syncDraftToCloud(employeeId, controller.signal),
+          timeoutPromise,
+        ]);
       } catch (err) {
-        const isAbort = controller.signal.aborted;
-        const errMsg = isAbort
-          ? `Timeout: draft sync for ${employeeId} took longer than 10000ms`
-          : (err && err.message) || String(err);
+        const errMsg = (err && err.message) || String(err);
         console.error('[AS-5] draft sync failed:', errMsg);
         setSaveStatus('error');
-        return;  // Exit loop on failure; next typing event starts a fresh loop
+        return;   // Exit loop on failure; next typing event starts a fresh loop
       } finally {
         clearTimeout(timeoutId);
       }
     }
-    // Loop drained cleanly — only flip to 'saved' if the user hasn't typed
-    // since (which would have pre-flipped status to 'unsaved').
-    if (currentSaveStatus !== 'unsaved') setSaveStatus('saved');
+    // Loop drained cleanly — every dirty change has been synced. Mark saved
+    // unconditionally; if the user types between loop exit and this line
+    // (microsecond race), the next typing event will start a fresh loop.
+    setSaveStatus('saved');
   } finally {
     s.running = null;
     s.abortController = null;
