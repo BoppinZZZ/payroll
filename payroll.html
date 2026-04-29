@@ -1493,11 +1493,28 @@ function loadState() {
 // We short-circuit to a no-op there and keep writing to localStorage only
 // in dev mode (file://), which skips auth and has no cloud fallback.
 function saveState(state) {
-  if (window.location.protocol !== 'file:') return;  // Cloud mode: no-op
+  // Dev mode: full STATE goes to localStorage as before.
+  if (window.location.protocol === 'file:') {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (e) {
+      console.warn("Failed to save data:", e);
+    }
+    return;
+  }
+  // [LF-1] Cloud mode: persist draft_period to localStorage so user-typed
+  // data never depends on cloud sync to survive a refresh. Cloud sync still
+  // runs in background; localStorage is the local source of truth for
+  // in-progress drafts.
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    if (state && state.draft_period) {
+      localStorage.setItem('payrollDraft', JSON.stringify({
+        savedAt: Date.now(),
+        draft_period: state.draft_period,
+      }));
+    }
   } catch (e) {
-    console.warn("Failed to save data:", e);
+    console.warn('[LF-1] Failed to save draft to localStorage:', e);
   }
 }
 
@@ -4275,7 +4292,9 @@ function queueDraftSync(employeeId) {
 }
 
 async function runDraftSyncLoop(employeeId, s) {
-  setSaveStatus('saving');   // [AS-3] show spinner while a sync is in flight
+  // [LF-1] Don't change indicator. localStorage already persisted the data
+  // (saveState in mutators), so 'saved' is the truth from the user's POV.
+  // Cloud sync runs invisibly; failures are logged but not shown.
   try {
     while (s.dirty) {
       s.dirty = false;
@@ -4309,18 +4328,21 @@ async function runDraftSyncLoop(employeeId, s) {
           s.dirty = true;
           return;
         }
+        // [LF-1] Cloud sync failed. Data is safely in localStorage already
+        // (saveState wrote it before queueing this sync), so the user isn't
+        // affected. Log to console for debugging and exit silently — don't
+        // surface as a visible error. Next typing event triggers a fresh
+        // attempt; on refresh, hydrateAndRender restores the local draft.
         const errMsg = (err && err.message) || String(err);
-        console.error('[AS-5] draft sync failed:', errMsg);
-        setSaveStatus('error');
-        return;   // Exit loop on failure; next typing event starts a fresh loop
+        console.warn('[LF-1] cloud sync failed silently (data is in localStorage):', errMsg);
+        return;
       } finally {
         clearTimeout(timeoutId);
       }
     }
-    // Loop drained cleanly — every dirty change has been synced. Mark saved
-    // unconditionally; if the user types between loop exit and this line
-    // (microsecond race), the next typing event will start a fresh loop.
-    setSaveStatus('saved');
+    // [LF-1] Loop drained — cloud caught up to localStorage. No status
+    // change needed; indicator already showed 'saved' from the moment
+    // the user typed.
   } finally {
     s.running = null;
     s.abortController = null;
@@ -4348,7 +4370,8 @@ function scheduleDraftSync(employeeId, delayMs = 0) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: no cloud sync
 
-  setSaveStatus('unsaved');   // [AS-3] immediate feedback that user just typed
+  // [LF-1] Don't set 'unsaved' status — saveState already wrote the data
+  // to localStorage (the local source of truth). Cloud sync runs invisibly.
 
   const existing = draftAutoSaveTimers.get(employeeId);
   if (existing) clearTimeout(existing);
@@ -10538,6 +10561,23 @@ async function hydrateAndRender() {
     }
     STATE = next;
     console.log('[hydrate] STATE rebuilt from Supabase. employees=' + STATE.employees.length);
+
+    // [LF-1] Overlay localStorage draft on top of cloud STATE. If the user
+    // typed locally and that hasn't synced to cloud yet, this restores their
+    // in-progress draft on refresh — independent of cloud sync state.
+    try {
+      const localJson = localStorage.getItem('payrollDraft');
+      if (localJson) {
+        const local = JSON.parse(localJson);
+        if (local && local.draft_period && STATE.current_period
+            && local.draft_period.pp === STATE.current_period.pp) {
+          STATE.draft_period = local.draft_period;
+          console.log('[LF-1] restored draft from localStorage (savedAt=' + new Date(local.savedAt).toLocaleTimeString() + ')');
+        }
+      }
+    } catch (e) {
+      console.warn('[LF-1] localStorage draft restore failed:', e);
+    }
 
     // Repaint whatever view the user is currently looking at so it uses the
     // new STATE. currentView is tracked globally and updated by showView().
