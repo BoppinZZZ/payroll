@@ -5537,9 +5537,25 @@ async function finalizePP(employeeId, btnEl) {
         }
       }
 
+      // [PF-1] Pull the cached timesheet_id off the draft entry. The
+      // queueDraftSync above guarantees it's been set — that function
+      // creates a timesheet if one doesn't exist for (employee, current
+      // period) and stores its uuid back on the entry. Required by the
+      // paystubs.timesheet_id NOT NULL constraint; without it createPaystub
+      // would crash with a database error and nothing would save.
+      const draftEntry = STATE.draft_period?.entries?.[employeeId];
+      const timesheetId = draftEntry?.timesheet_id;
+      if (!timesheetId) {
+        throw new Error(
+          'No timesheet found for this employee in the current period. ' +
+          'Try refreshing the page and click Finalize again.'
+        );
+      }
+
       // Create the new paystub row. Map period field names (app-friendly)
       // to DAL/DB column names. Matches the mirror mapping in toAppState.
       const cloudRow = await DAL.createPaystub({
+        timesheet_id:          timesheetId,
         employee_id:           emp.id,
         pay_period_id:         STATE.current_period.pay_period_id,
         hours:                 period.total_hours,
