@@ -580,6 +580,7 @@
   .rpp-status { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 10px; border-radius: 999px; }
   .rpp-status.not-started { background: var(--border-soft); color: var(--muted); }
   .rpp-status.in-progress { background: var(--amber-soft); color: var(--amber); }
+  .rpp-status.finalized   { background: var(--green-soft); color: var(--green); }
   .rpp-card-arrow { color: var(--muted); font-size: 18px; }
   .rpp-entry-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding: 12px 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
   .rpp-breadcrumb { font-size: 13px; color: var(--muted); cursor: pointer; background: none; border: none; padding: 0; font-family: inherit; }
@@ -4866,11 +4867,14 @@ function renderRunPayrollPicker() {
   const activeEmps = STATE.employees.filter(emp => emp.active);
 
   const cards = activeEmps.map(emp => {
-    const entry = draft.entries[emp.id];
-    const hasData = draftEntryHasData(entry);
-    const statusBadge = hasData
-      ? `<span class="rpp-status in-progress">In progress</span>`
-      : `<span class="rpp-status not-started">Not started</span>`;
+    // Use the shared three-state helper so the picker matches the dashboard
+    // widget. Old inline check only handled in-progress vs not-started, which
+    // wrongly showed "In progress" for employees who'd already finalized.
+    const status = currentPeriodEmployeeStatus(emp);
+    const statusBadge =
+      status === 'finalized'   ? `<span class="rpp-status finalized">Finalized</span>` :
+      status === 'in_progress' ? `<span class="rpp-status in-progress">In progress</span>` :
+                                 `<span class="rpp-status not-started">Not started</span>`;
     return `
       <div class="rpp-card" onclick="selectRunPayrollEmployee('${emp.id}')" title="Open ${esc(emp.name)}'s pay entry">
         <div class="rpp-card-top">${renderEmployeeCell(emp)}</div>
