@@ -10561,13 +10561,27 @@ async function hydrateAndRender() {
     // [LF-1] Overlay localStorage draft on top of cloud STATE. If the user
     // typed locally and that hasn't synced to cloud yet, this restores their
     // in-progress draft on refresh — independent of cloud sync state.
+    //
+    // [LF-3] Merge entries per-employee instead of wholesale replacing the
+    // draft_period. localStorage only contains drafts for employees whose
+    // entries were edited in THIS browser. A wholesale replace wiped out
+    // other employees' cloud-synced drafts — for example, an admin loading
+    // the page would lose visibility into what employees entered on their
+    // own devices. The fix: keep cloud entries for employees not in
+    // localStorage, and let localStorage override only for employees that
+    // ARE in localStorage (preserving local-first behavior for the editor).
     try {
       const localJson = localStorage.getItem('payrollDraft');
       if (localJson) {
         const local = JSON.parse(localJson);
         if (local && local.draft_period && STATE.current_period
             && local.draft_period.pp === STATE.current_period.pp) {
-          STATE.draft_period = local.draft_period;
+          const cloudEntries = STATE.draft_period?.entries || {};
+          const localEntries = local.draft_period.entries || {};
+          STATE.draft_period = {
+            ...STATE.draft_period,
+            entries: { ...cloudEntries, ...localEntries },
+          };
           console.log('[LF-1] restored draft from localStorage (savedAt=' + new Date(local.savedAt).toLocaleTimeString() + ')');
         }
       }
