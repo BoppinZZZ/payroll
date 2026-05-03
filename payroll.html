@@ -528,6 +528,13 @@
        The shared @page rule above (letter, 0.5in margins) covers layout.
        Here we strip interactive UI and reset colors so rows print cleanly.  */
     .receipts-print-header { display: block !important; }
+    /* [PS-1e] Total Paystub — show period label, hide nothing else (the
+       receipts-table print rules above already cover the table itself
+       since we reuse that class). The employer-totals box prints as-is
+       with a thin border for clarity; reset background to white. */
+    .pps-print-header { display: block !important; margin-bottom: 12px !important; }
+    .pps-employer-totals { background: white !important; border: 1px solid #999 !important; page-break-inside: avoid; }
+    .pps-employer-totals tr.total td { border-top: 2px solid #000 !important; }
     .receipts-table { border: 1px solid #999 !important; }
     .receipts-table th { background: #f5f5f5 !important; color: #000 !important; }
     .receipts-table td { color: #000 !important; }
@@ -902,6 +909,18 @@
   .rcpt-status-pill.finalized { background: var(--green-soft);   color: var(--green); }
   /* Hidden on screen; revealed inside @media print above. */
   .receipts-print-header { display: none; }
+
+  /* [PS-1e] Total Paystub — print-only header is hidden onscreen, shown
+     during print via the @media print block above (the dropdown is hidden
+     in print so we need a static label so anyone reading the printout
+     knows which pay period it covers). */
+  .pps-print-header { display: none; }
+  .pps-employer-totals { margin-top: 24px; padding: 20px 24px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
+  .pps-employer-totals-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; margin-bottom: 12px; }
+  .pps-employer-totals table { width: 100%; border-collapse: collapse; }
+  .pps-employer-totals td { padding: 8px 0; font-size: 14px; }
+  .pps-employer-totals td.amt { text-align: right; font-variant-numeric: tabular-nums; }
+  .pps-employer-totals tr.total td { border-top: 2px solid var(--text); padding-top: 12px; font-weight: 700; }
   .print-only-attached   { display: none; }
 
   /* ==========================================================================
@@ -3011,20 +3030,75 @@ function renderPayPeriodSummary() {
     return `<option value="${p.pp}"${sel}>${periodLabel(p)}</option>`;
   }).join("");
 
+  // [PS-1e] Print-only header. Hidden onscreen; visible during print since
+  // the dropdown gets hidden in print and we still need a label that says
+  // which period the printout covers.
+  const selStart = periodStart(selected.end_date);
+  const printLabel = `Total Paystub — PP${selected.pp} (${formatDate(selStart)} – ${formatDate(selected.end_date)})`;
+
   return `
     <div class="page-header">
       <div>
         <div class="page-title">Total Paystub</div>
         <div class="page-sub">Combined view of all employees' pay for a single period.</div>
       </div>
-      <div class="quarter-select-wrap">
-        <label class="quarter-select-label" for="pay-period-summary-pp">Pay Period</label>
-        <select id="pay-period-summary-pp" class="quarter-select" onchange="selectPayPeriodSummaryPP(this.value)">
-          ${options}
-        </select>
+      <div style="display:flex; gap:12px; align-items:flex-end;">
+        <div class="quarter-select-wrap">
+          <label class="quarter-select-label" for="pay-period-summary-pp">Pay Period</label>
+          <select id="pay-period-summary-pp" class="quarter-select" onchange="selectPayPeriodSummaryPP(this.value)">
+            ${options}
+          </select>
+        </div>
+        <button class="btn" onclick="window.print()" title="Print or save as PDF" style="height:42px;">Print / PDF</button>
       </div>
     </div>
+    <div class="pps-print-header" style="font-family: 'IBM Plex Serif', Georgia, serif; font-size: 18px; font-weight: 500;">${esc(printLabel)}</div>
     ${renderPayPeriodSummaryTable(selected)}
+    ${renderPayPeriodSummaryEmployerTotals(selected)}
+  `;
+}
+
+// [PS-1e] Employer-side totals box. Aggregates per-employee employer_taxes
+// (only attached to a period when at least one value was non-zero) for the
+// selected PP. Useful for filing the bi-weekly EFTPS deposit and for tying
+// to the Tax Filings page's quarterly aggregates.
+//
+// If no employer_taxes data is present (e.g. an old paystub finalized before
+// the employer-side fields existed), returns an empty string — the box just
+// doesn't render. That's a softer fail than showing $0.00s that look real.
+function renderPayPeriodSummaryEmployerTotals(selected) {
+  const N = v => (v == null ? 0 : Number(v));
+  const totals = { ss_er: 0, medicare_er: 0, suta: 0, ett: 0, futa: 0 };
+  let anyData = false;
+
+  for (const emp of (STATE.employees || [])) {
+    const period = (emp.periods || []).find(p => p.pp === selected.pp && isPaystubActive(p));
+    if (!period || !period.employer_taxes) continue;
+    const e = period.employer_taxes;
+    totals.ss_er       += N(e.ss_er);
+    totals.medicare_er += N(e.medicare_er);
+    totals.suta        += N(e.suta);
+    totals.ett         += N(e.ett);
+    totals.futa        += N(e.futa);
+    anyData = true;
+  }
+
+  if (!anyData) return '';
+
+  const grandTotal = totals.ss_er + totals.medicare_er + totals.suta + totals.ett + totals.futa;
+
+  return `
+    <div class="pps-employer-totals">
+      <div class="pps-employer-totals-title">Employer Taxes (PP${selected.pp})</div>
+      <table>
+        <tr><td>Social Security (employer match)</td><td class="amt">${money(totals.ss_er)}</td></tr>
+        <tr><td>Medicare (employer match)</td><td class="amt">${money(totals.medicare_er)}</td></tr>
+        <tr><td>CA SUTA (State Unemployment)</td><td class="amt">${money(totals.suta)}</td></tr>
+        <tr><td>CA ETT (Employment Training Tax)</td><td class="amt">${money(totals.ett)}</td></tr>
+        <tr><td>FUTA (Federal Unemployment)</td><td class="amt">${money(totals.futa)}</td></tr>
+        <tr class="total"><td>TOTAL EMPLOYER TAXES</td><td class="amt">${money(grandTotal)}</td></tr>
+      </table>
+    </div>
   `;
 }
 
