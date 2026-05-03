@@ -3024,9 +3024,93 @@ function renderPayPeriodSummary() {
         </select>
       </div>
     </div>
-    <div class="empty" style="padding:32px; text-align:center; line-height:1.6;">
-      <div style="font-weight:600; color:var(--text); margin-bottom:8px;">PS-1b dropdown ready · Selected PP${selected.pp}</div>
-      <div>Per-employee summary table coming in PS-1c.</div>
+    ${renderPayPeriodSummaryTable(selected)}
+  `;
+}
+
+// [PS-1c] Per-employee summary table for the selected pay period.
+// One row per employee that has an active (non-voided) paystub for the
+// selected PP. Reuses the existing .receipts-table CSS class for visual
+// consistency with the Receipts page (similar tabular data display).
+//
+// Columns: Employee, Hours, Gross, FIT, CA PIT, SS, Medicare, CA SDI,
+// Total Tax, Reimb, Net.
+// - Total Tax = sum of the 5 taxes (computed here, not stored).
+// - Reimb     = mileage_dollars + non-mileage reimbursement.
+// - Net       = period.net_pay (stored on the paystub at finalize time).
+//
+// Numeric cells are right-aligned via inline style (avoids adding a new
+// utility CSS class for one use site).
+function renderPayPeriodSummaryTable(selected) {
+  // Local number coercer — N() is defined per-function in this codebase
+  // (e.g. inside loadFromSupabase), so we declare our own to keep the
+  // same null-safe semantics without leaking a global.
+  const N = v => (v == null ? 0 : Number(v));
+
+  // Collect employees with an active paystub for the selected PP.
+  // Each row is { emp, period } so the renderer has both context and data.
+  const rows = [];
+  for (const emp of (STATE.employees || [])) {
+    const period = (emp.periods || []).find(p => p.pp === selected.pp && isPaystubActive(p));
+    if (period) rows.push({ emp, period });
+  }
+
+  // Defensive empty state. The dropdown only lists periods that have at
+  // least one active paystub, so this branch shouldn't trigger normally —
+  // but guard anyway in case of stale state.
+  if (rows.length === 0) {
+    return `
+      <div class="empty" style="padding:32px; text-align:center;">
+        No active paystubs for PP${selected.pp}. (Voided paystubs are excluded.)
+      </div>
+    `;
+  }
+
+  const numStyle = ' style="text-align:right;"';
+
+  const bodyRows = rows.map(({ emp, period }) => {
+    const t = period.taxes || {};
+    const totalTax = N(t.federal) + N(t.ca_state) + N(t.ss) + N(t.medicare) + N(t.ca_sdi);
+    const reimb    = N(period.mileage_dollars) + N(period.reimbursement);
+    return `
+      <tr>
+        <td>${esc(emp.name || '')}</td>
+        <td${numStyle}>${N(period.total_hours).toFixed(2)}</td>
+        <td${numStyle}>${money(period.gross_pay)}</td>
+        <td${numStyle}>${money(t.federal)}</td>
+        <td${numStyle}>${money(t.ca_state)}</td>
+        <td${numStyle}>${money(t.ss)}</td>
+        <td${numStyle}>${money(t.medicare)}</td>
+        <td${numStyle}>${money(t.ca_sdi)}</td>
+        <td${numStyle}>${money(totalTax)}</td>
+        <td${numStyle}>${money(reimb)}</td>
+        <td${numStyle}><strong>${money(period.net_pay)}</strong></td>
+      </tr>
+    `;
+  }).join("");
+
+  return `
+    <div style="overflow-x:auto;">
+      <table class="receipts-table">
+        <thead>
+          <tr>
+            <th>Employee</th>
+            <th${numStyle}>Hours</th>
+            <th${numStyle}>Gross</th>
+            <th${numStyle}>FIT</th>
+            <th${numStyle}>CA PIT</th>
+            <th${numStyle}>SS</th>
+            <th${numStyle}>Medicare</th>
+            <th${numStyle}>CA SDI</th>
+            <th${numStyle}>Total Tax</th>
+            <th${numStyle}>Reimb</th>
+            <th${numStyle}>Net</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${bodyRows}
+        </tbody>
+      </table>
     </div>
   `;
 }
