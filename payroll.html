@@ -1160,6 +1160,10 @@
     <!-- [RC-3] Receipts: visible to both admin and employee. Admin sees all
          receipts firm-wide; employee sees only their own (RLS-enforced). -->
     <div class="nav-item" data-view="receipts"><span class="icon">◆</span> Receipts</div>
+    <!-- [PS-1] Total Paystub: per-period roll-up of all employees' paystubs.
+         Admin-only — shows the whole org's pay for a single chosen period.
+         Distinct from Tax Filings (quarterly) and Year-End (annual). -->
+    <div class="nav-item admin-only" data-view="pay-period-summary"><span class="icon">◆</span> Total Paystub</div>
     <div class="nav-item admin-only" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
     <!-- [WG-3] Year-End: hosts W-2 forms and annual totals. Admin-only. -->
     <div class="nav-item admin-only" data-view="year-end"><span class="icon">◆</span> Year-End</div>
@@ -2932,6 +2936,41 @@ function renderHistory() {
     ${sections}
   `;
 }
+
+// ==========================================================================
+// [PS-1] Total Paystub — admin-only roll-up of all employees' paystubs for
+// a single chosen pay period. Read-only. Distinct from Tax Filings (which
+// aggregates by quarter) and Year-End (which aggregates annually): this view
+// is per-period totals, useful for filing the bi-weekly tax deposit and for
+// at-a-glance visibility into one payroll run.
+//
+// Chunks:
+//   PS-1a — nav item + page shell + admin gate          (THIS CHUNK)
+//   PS-1b — period selector (lists finalized periods)
+//   PS-1c — per-employee summary table
+//   PS-1d — TOTALS row
+//   PS-1e — employer-side totals + print CSS
+// ==========================================================================
+function renderPayPeriodSummary() {
+  // Defensive admin gate. The sidebar's admin-only class already hides this
+  // nav item from employees, but a direct hash navigation could still land
+  // here, so we double-check at render time.
+  if (currentUserRole !== 'admin') return renderNonAdminStub();
+
+  return `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Total Paystub</div>
+        <div class="page-sub">Combined view of all employees' pay for a single period.</div>
+      </div>
+    </div>
+    <div class="empty" style="padding:32px; text-align:center; line-height:1.6;">
+      <div style="font-weight:600; color:var(--text); margin-bottom:8px;">PS-1a shell in place.</div>
+      <div>Period selector, per-employee table, and totals coming in PS-1b through PS-1e.</div>
+    </div>
+  `;
+}
+
 
 // --------------------------------------------------------------------------
 // Tax Filings page (Chunk 2: shell + quarter selector)
@@ -6769,6 +6808,7 @@ function showView(viewName) {
     html = renderReceipts();
     loadReceiptsData();
   }
+  else if (viewName === "pay-period-summary") html = renderPayPeriodSummary();
   else if (viewName === "tax-filings") html = renderTaxFilings();
   else if (viewName === "year-end") html = renderYearEnd();
   else if (viewName === "activity-log") html = renderActivityLog();
