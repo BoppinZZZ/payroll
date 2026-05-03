@@ -921,6 +921,10 @@
   .pps-employer-totals td { padding: 8px 0; font-size: 14px; }
   .pps-employer-totals td.amt { text-align: right; font-variant-numeric: tabular-nums; }
   .pps-employer-totals tr.total td { border-top: 2px solid var(--text); padding-top: 12px; font-weight: 700; }
+  /* [PS-1f] YTD wage-base indicator: green pill when an employee has hit
+     the FUTA/SUTA/ETT cap; muted text showing dollars-to-cap otherwise. */
+  .pps-ytd-badge { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 10px; border-radius: 999px; background: var(--green-soft); color: var(--green); white-space: nowrap; }
+  .pps-ytd-remaining { font-size: 12px; color: var(--muted); font-weight: 500; white-space: nowrap; }
   .print-only-attached   { display: none; }
 
   /* ==========================================================================
@@ -1818,6 +1822,25 @@ function periodsWithFinalizedPaystubs() {
     });
   });
   return Array.from(seen.values()).sort((a, b) => a.pp - b.pp);
+}
+
+// [PS-1f] Sum of one employee's active (non-voided) gross pay across all
+// paystubs in the given calendar year, through (and including) the given
+// pp number. Used by the YTD wage-base tracker on the Total Paystub page.
+//
+// Note: this is intentionally inclusive of throughPp — a viewer of PP9
+// expects "YTD as of PP9", not "YTD before PP9". The tax engine's
+// priorYtdGrossFor() is exclusive (it computes wages BEFORE the period
+// being calculated). Same data, different cutoff convention.
+function ytdGrossThroughPP(emp, year, throughPp) {
+  let total = 0;
+  for (const p of (emp.periods || [])) {
+    if (!isPaystubActive(p)) continue;
+    if (yearOfDate(p.end_date) !== year) continue;
+    if (p.pp > throughPp) continue;
+    total += (p.gross_pay == null ? 0 : Number(p.gross_pay));
+  }
+  return total;
 }
 
 // --------------------------------------------------------------------------
@@ -3055,6 +3078,7 @@ function renderPayPeriodSummary() {
     <div class="pps-print-header" style="font-family: 'IBM Plex Serif', Georgia, serif; font-size: 18px; font-weight: 500;">${esc(printLabel)}</div>
     ${renderPayPeriodSummaryTable(selected)}
     ${renderPayPeriodSummaryEmployerTotals(selected)}
+    ${renderPayPeriodSummaryYtdCard(selected)}
   `;
 }
 
@@ -3097,6 +3121,63 @@ function renderPayPeriodSummaryEmployerTotals(selected) {
         <tr><td>CA ETT (Employment Training Tax)</td><td class="amt">${money(totals.ett)}</td></tr>
         <tr><td>FUTA (Federal Unemployment)</td><td class="amt">${money(totals.futa)}</td></tr>
         <tr class="total"><td>TOTAL EMPLOYER TAXES</td><td class="amt">${money(grandTotal)}</td></tr>
+      </table>
+    </div>
+  `;
+}
+
+// [PS-1f] YTD Gross by Employee card. Shows each active employee's
+// cumulative gross pay through the selected period, with a visual
+// indicator for FUTA/SUTA/ETT wage-base cap status.
+//
+// The cap value comes from STATE.tax_rates.state_unemployment_wage_base
+// so updates on the Tax Rates page automatically flow here — no hardcoded
+// $7,000. Falls back to 7000 only if rates haven't loaded yet.
+//
+// Per-employee row shape: name | YTD amount | indicator (badge or
+// dollars-to-cap text). TOTAL row sums across employees. Returns empty
+// string if no active employees have any paystubs this year (section
+// just hides instead of rendering an empty card).
+function renderPayPeriodSummaryYtdCard(selected) {
+  const N = v => (v == null ? 0 : Number(v));
+  const year = yearOfDate(selected.end_date);
+  const cap  = (STATE.tax_rates && STATE.tax_rates.state_unemployment_wage_base) || 7000;
+
+  // Build one row per active employee with at least one paystub this year.
+  const rows = [];
+  for (const emp of (STATE.employees || [])) {
+    if (emp.active === false) continue;
+    const ytd = ytdGrossThroughPP(emp, year, selected.pp);
+    if (ytd === 0) continue;
+    rows.push({ emp, ytd });
+  }
+
+  if (rows.length === 0) return '';
+
+  const grandTotal = rows.reduce((sum, r) => sum + r.ytd, 0);
+  const capDollar  = '$' + cap.toLocaleString();
+
+  const rowHtml = rows.map(({ emp, ytd }) => {
+    const atCap     = ytd >= cap;
+    const remaining = Math.max(0, cap - ytd);
+    const indicator = atCap
+      ? `<span class="pps-ytd-badge">AT CAP — no FUTA/SUTA/ETT</span>`
+      : `<span class="pps-ytd-remaining">${money(remaining)} to ${capDollar} cap</span>`;
+    return `
+      <tr>
+        <td>${esc(emp.name || '')}</td>
+        <td class="amt">${money(ytd)}</td>
+        <td style="padding-left:16px;">${indicator}</td>
+      </tr>
+    `;
+  }).join("");
+
+  return `
+    <div class="pps-employer-totals" style="margin-top:18px;">
+      <div class="pps-employer-totals-title">YTD Gross by Employee (${year} — through PP${selected.pp})</div>
+      <table>
+        ${rowHtml}
+        <tr class="total"><td>TOTAL</td><td class="amt">${money(grandTotal)}</td><td></td></tr>
       </table>
     </div>
   `;
