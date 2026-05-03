@@ -1234,6 +1234,16 @@
         <input type="text" id="emp-form-name" class="emp-form-input" placeholder="e.g. Jane Doe" oninput="handleEmpNameInput()" autocomplete="off" />
         <div class="emp-form-error" id="emp-err-name">Please enter a full name.</div>
       </div>
+      <!-- [EM-1b] Email field. Required in Add mode (used to link the new
+           employee row to their auth.users login). Optional in Edit mode
+           (leave blank to keep the existing link). The required asterisk
+           and hint text are toggled by openAddEmployeeModal / open
+           EditEmployeeModal so one HTML structure serves both modes. -->
+      <div class="emp-form-field">
+        <label class="emp-form-label" for="emp-form-email">Email <span class="required" id="emp-form-email-required">*</span> <span class="emp-form-hint" id="emp-form-email-hint">(used to link their login)</span></label>
+        <input type="email" id="emp-form-email" class="emp-form-input" placeholder="e.g. jane@example.com" autocomplete="off" />
+        <div class="emp-form-error" id="emp-err-email">Please enter a valid email address.</div>
+      </div>
       <div class="emp-form-field">
         <label class="emp-form-label" for="emp-form-title">Title <span class="required">*</span></label>
         <input type="text" id="emp-form-title" class="emp-form-input" placeholder="e.g. Bookkeeper" autocomplete="off" />
@@ -8383,6 +8393,13 @@ function openAddEmployeeModal() {
   document.getElementById("emp-form-avatar").value = "";
   document.getElementById("emp-form-employee-id").value = suggestNextEmployeeId();
   document.getElementById("emp-form-active").checked = true;
+  // [EM-1b] Email starts blank in Add mode. Required asterisk shown,
+  // hint reads "used to link their login".
+  document.getElementById("emp-form-email").value = "";
+  const emailRequired = document.getElementById("emp-form-email-required");
+  if (emailRequired) emailRequired.style.display = "";
+  const emailHint = document.getElementById("emp-form-email-hint");
+  if (emailHint) emailHint.textContent = "(used to link their login)";
   // [WG-2] Address fields default empty for new employees
   document.getElementById("emp-form-street").value = "";
   document.getElementById("emp-form-city").value = "";
@@ -8401,7 +8418,7 @@ function openAddEmployeeModal() {
   if (activeRow) activeRow.style.display = "";
 
   // Hide any previously shown error messages
-  ["emp-err-name", "emp-err-title", "emp-err-rate", "emp-err-avatar", "emp-err-employee-id"].forEach(id => {
+  ["emp-err-name", "emp-err-title", "emp-err-rate", "emp-err-avatar", "emp-err-employee-id", "emp-err-email"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.classList.remove("show");
   });
@@ -8433,6 +8450,15 @@ function openEditEmployeeModal(empId) {
   document.getElementById("emp-form-rate").value = (emp.hourly_rate != null) ? String(emp.hourly_rate) : "";
   document.getElementById("emp-form-avatar").value = emp.avatar || "";
   document.getElementById("emp-form-employee-id").value = emp.employee_id || "";
+  // [EM-1b] Email is OPTIONAL in Edit mode. We don't prefill it (the email
+  // lives on auth.users, not on the employees row) — admin types it ONLY
+  // if they want to set or change the link. Hide the required asterisk and
+  // swap the hint to make this clear.
+  document.getElementById("emp-form-email").value = "";
+  const emailRequired = document.getElementById("emp-form-email-required");
+  if (emailRequired) emailRequired.style.display = "none";
+  const emailHint = document.getElementById("emp-form-email-hint");
+  if (emailHint) emailHint.textContent = "(leave blank to keep existing link)";
   // [WG-2] Prefill address fields (empty string for any null DB values)
   document.getElementById("emp-form-street").value = emp.street || "";
   document.getElementById("emp-form-city").value   = emp.city   || "";
@@ -8456,7 +8482,7 @@ function openEditEmployeeModal(empId) {
   if (activeRow) activeRow.style.display = "none";
 
   // Hide any previously shown error messages
-  ["emp-err-name", "emp-err-title", "emp-err-rate", "emp-err-avatar", "emp-err-employee-id"].forEach(id => {
+  ["emp-err-name", "emp-err-title", "emp-err-rate", "emp-err-avatar", "emp-err-employee-id", "emp-err-email"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.classList.remove("show");
   });
@@ -8556,6 +8582,9 @@ function submitEmployeeModal() {
   const rateRaw = document.getElementById("emp-form-rate").value.trim();
   const avatarRaw = document.getElementById("emp-form-avatar").value.trim().toUpperCase();
   const employeeIdRaw = document.getElementById("emp-form-employee-id").value.trim();
+  // [EM-1b] Email — required in Add mode (drives the auth-link lookup),
+  // optional in Edit mode (blank = "leave existing link alone").
+  const emailRaw = document.getElementById("emp-form-email").value.trim();
   // [WG-2] Address fields — all optional, no validation needed (DB columns are nullable)
   const streetRaw = document.getElementById("emp-form-street").value.trim();
   const cityRaw   = document.getElementById("emp-form-city").value.trim();
@@ -8601,11 +8630,33 @@ function submitEmployeeModal() {
     }
   }
 
+  // [EM-1b] Email validation — REQUIRED in Add mode, OPTIONAL in Edit mode.
+  // Format check uses a basic email shape (not a full RFC validator —
+  // catches typos like "annie@gmail" without false-rejecting unusual but
+  // valid addresses). Error message swaps for the missing-vs-malformed case.
+  const errEmail   = document.getElementById("emp-err-email");
+  const isAddMode  = empModalEditingId === null;
+  const emailShape = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+  if (isAddMode && !emailRaw) {
+    errEmail.textContent = "Please enter the employee's email address.";
+    errEmail.classList.add("show");
+    valid = false;
+  } else if (emailRaw && !emailShape.test(emailRaw)) {
+    errEmail.textContent = "Please enter a valid email address (like name@example.com).";
+    errEmail.classList.add("show");
+    valid = false;
+  } else {
+    errEmail.classList.remove("show");
+  }
+
   if (!valid) return;  // Stop here — user will fix errors and re-submit
 
   // Dispatch to the correct handler.
   const fields = {
     name: nameRaw, title: titleRaw, rate: rateNum, avatar: avatarRaw, employee_id: employeeIdRaw,
+    // [EM-1b] Email — used by createEmployeeFromForm / applyEmployeeEdit to
+    // look up the matching auth.users.id and pass it as profile_id.
+    email: emailRaw,
     // [WG-2] Address — passed through unchanged (createEmployee/updateEmployee handle '' → null)
     street: streetRaw, city: cityRaw, state: stateRaw, zip: zipRaw,
   };
@@ -8615,6 +8666,27 @@ function submitEmployeeModal() {
     createEmployeeFromForm(fields);
   } else {
     applyEmployeeEdit(empModalEditingId, fields);
+  }
+}
+
+// [EM-1b] Look up an auth.users.id by email via the find_auth_user_by_email
+// SECURITY DEFINER RPC. Returns the UUID if a matching auth user exists,
+// otherwise null. Fails open: any RPC error logs a warning and returns null
+// so the surrounding save flow can still create/update the employee row
+// without the link (better than aborting on a transient network blip).
+async function findAuthUserIdByEmail(email) {
+  const e = (email || '').trim();
+  if (!e) return null;
+  try {
+    const { data, error } = await supabaseClient.rpc('find_auth_user_by_email', { p_email: e });
+    if (error) {
+      console.warn('[EM-1b] find_auth_user_by_email RPC error:', error.message || error);
+      return null;
+    }
+    return data || null;
+  } catch (e2) {
+    console.warn('[EM-1b] find_auth_user_by_email threw:', e2);
+    return null;
   }
 }
 
@@ -8633,6 +8705,13 @@ async function createEmployeeFromForm(fields) {
   // offline testing.
   const isDevMode = window.location.protocol === 'file:';
   try {
+    // [EM-1b] Try to link this new employee to an existing auth account via
+    // their email. If the auth user exists (e.g. they signed up before being
+    // added as an employee), profile_id is set immediately. If not, the row
+    // is created unlinked and admin can re-open Edit Employee to retry the
+    // lookup after the employee signs up.
+    const linkedProfileId = !isDevMode ? await findAuthUserIdByEmail(fields.email) : null;
+
     let newEmp;
     if (!isDevMode) {
       const cloudRow = await DAL.createEmployee({
@@ -8642,6 +8721,9 @@ async function createEmployeeFromForm(fields) {
         hourly_rate: fields.rate,
         avatar:      fields.avatar,
         active:      fields.active,
+        // [EM-1b] Auth link (UUID) or null. DAL accepts profile_id and
+        // writes it through to the employees row.
+        profile_id:  linkedProfileId,
         // [WG-2] Address fields — DAL converts '' → null
         street:      fields.street,
         city:        fields.city,
@@ -8653,6 +8735,9 @@ async function createEmployeeFromForm(fields) {
       // renderHistory / dashboard all handle an empty periods array.
       newEmp = {
         id:          cloudRow.id,                       // UUID from Supabase
+        // [EM-1b] Mirror profile_id into STATE so views that gate on it
+        // (e.g. employee self-service) work without another hydrate round-trip.
+        profile_id:  cloudRow.profile_id || null,
         employee_id: cloudRow.employee_id,
         name:        cloudRow.name,
         title:       cloudRow.title,
@@ -8669,6 +8754,8 @@ async function createEmployeeFromForm(fields) {
       // Dev mode: keep the local name-based id so offline testing still works.
       newEmp = {
         id:          generateEmployeeId(fields.name),
+        // [EM-1b] Always null in dev mode — there's no auth.users to link to.
+        profile_id:  null,
         employee_id: fields.employee_id,
         name:        fields.name,
         title:       fields.title,
@@ -8686,6 +8773,21 @@ async function createEmployeeFromForm(fields) {
     // Push to STATE and persist to localStorage
     STATE.employees.push(newEmp);
     saveState(STATE);
+
+    // [EM-1b] Tell admin whether the auth link succeeded. If it did, the
+    // new employee can sign in immediately. If not, they need to sign up
+    // first — admin re-opens Edit Employee after signup to retry the link.
+    if (!isDevMode) {
+      if (newEmp.profile_id) {
+        showToast(`Employee added — login linked to ${fields.email}.`, 'success');
+      } else {
+        showToast(
+          `Employee added, but no login was found for ${fields.email}. ` +
+          `Have them sign up first, then re-open Edit Employee to link the account.`,
+          'warning'
+        );
+      }
+    }
 
     // Close the modal and refresh the Employees view so the new row appears
     closeAddEmployeeModal();
@@ -8742,8 +8844,30 @@ async function applyEmployeeEdit(empId, fields) {
 
   const isDevMode = window.location.protocol === 'file:';
   try {
+    // [EM-1b] Email-link semantics in Edit mode:
+    //   - email blank → don't touch profile_id (existing link preserved)
+    //   - email filled, lookup matches → set profile_id to that user
+    //   - email filled, no match → don't touch profile_id, warn the admin
+    // Tracks both "we attempted a link" and "we found a match" so the
+    // success toast and STATE mirror can branch on them below.
+    let attemptedLink = false;
+    let linkedProfileId = null;
+    let linkMessage = '';
+    if (!isDevMode && fields.email) {
+      attemptedLink = true;
+      linkedProfileId = await findAuthUserIdByEmail(fields.email);
+      if (linkedProfileId) {
+        linkMessage = `Linked login to ${fields.email}.`;
+      } else {
+        linkMessage = `No login found for ${fields.email}. Existing link is unchanged.`;
+      }
+    }
+
     if (!isDevMode) {
-      await DAL.updateEmployee(emp.id, {
+      // Build the update payload. Only include profile_id when we have a
+      // valid match — omitting the key entirely tells DAL.updateEmployee
+      // to skip that column, which preserves the current value.
+      const updatePayload = {
         name:        fields.name,
         title:       fields.title,
         hourly_rate: newRate,
@@ -8754,7 +8878,11 @@ async function applyEmployeeEdit(empId, fields) {
         city:        fields.city,
         state:       fields.state,
         zip:         fields.zip,
-      });
+      };
+      if (linkedProfileId) {
+        updatePayload.profile_id = linkedProfileId;
+      }
+      await DAL.updateEmployee(emp.id, updatePayload);
     }
 
     // Mirror the update into STATE. emp.id, emp.active, emp.periods are
@@ -8770,8 +8898,16 @@ async function applyEmployeeEdit(empId, fields) {
     emp.city        = fields.city   || '';
     emp.state       = fields.state  || '';
     emp.zip         = fields.zip    || '';
+    // [EM-1b] Mirror new profile_id when a link was made.
+    if (linkedProfileId) emp.profile_id = linkedProfileId;
 
     saveState(STATE);
+
+    // [EM-1b] Tell admin what happened with the link attempt, if any.
+    if (attemptedLink) {
+      showToast(linkMessage, linkedProfileId ? 'success' : 'warning');
+    }
+
     closeAddEmployeeModal();
     showView("employees");
   } catch (err) {
