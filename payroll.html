@@ -3068,10 +3068,32 @@ function renderPayPeriodSummaryTable(selected) {
 
   const numStyle = ' style="text-align:right;"';
 
+  // [PS-1d] Running totals across employees. Accumulated in the same loop
+  // that builds the body rows so we only iterate once. Each total mirrors a
+  // column in the table; the TOTALS row at the bottom prints these directly.
+  const totals = {
+    hours: 0, gross: 0,
+    fit: 0, ca_pit: 0, ss: 0, medicare: 0, ca_sdi: 0,
+    total_tax: 0, reimb: 0, net: 0,
+  };
+
   const bodyRows = rows.map(({ emp, period }) => {
     const t = period.taxes || {};
     const totalTax = N(t.federal) + N(t.ca_state) + N(t.ss) + N(t.medicare) + N(t.ca_sdi);
     const reimb    = N(period.mileage_dollars) + N(period.reimbursement);
+
+    // Accumulate into the running totals.
+    totals.hours     += N(period.total_hours);
+    totals.gross     += N(period.gross_pay);
+    totals.fit       += N(t.federal);
+    totals.ca_pit    += N(t.ca_state);
+    totals.ss        += N(t.ss);
+    totals.medicare  += N(t.medicare);
+    totals.ca_sdi    += N(t.ca_sdi);
+    totals.total_tax += totalTax;
+    totals.reimb     += reimb;
+    totals.net       += N(period.net_pay);
+
     return `
       <tr>
         <td>${esc(emp.name || '')}</td>
@@ -3088,6 +3110,25 @@ function renderPayPeriodSummaryTable(selected) {
       </tr>
     `;
   }).join("");
+
+  // [PS-1d] TOTALS row in <tfoot>. Reuses .receipts-table tfoot styling
+  // (top border + bg tint, defined globally) so it visually separates from
+  // the per-employee rows. Bolded throughout for emphasis.
+  const totalsRow = `
+    <tr>
+      <td><strong>TOTALS</strong></td>
+      <td${numStyle}><strong>${totals.hours.toFixed(2)}</strong></td>
+      <td${numStyle}><strong>${money(totals.gross)}</strong></td>
+      <td${numStyle}><strong>${money(totals.fit)}</strong></td>
+      <td${numStyle}><strong>${money(totals.ca_pit)}</strong></td>
+      <td${numStyle}><strong>${money(totals.ss)}</strong></td>
+      <td${numStyle}><strong>${money(totals.medicare)}</strong></td>
+      <td${numStyle}><strong>${money(totals.ca_sdi)}</strong></td>
+      <td${numStyle}><strong>${money(totals.total_tax)}</strong></td>
+      <td${numStyle}><strong>${money(totals.reimb)}</strong></td>
+      <td${numStyle}><strong>${money(totals.net)}</strong></td>
+    </tr>
+  `;
 
   return `
     <div style="overflow-x:auto;">
@@ -3110,6 +3151,9 @@ function renderPayPeriodSummaryTable(selected) {
         <tbody>
           ${bodyRows}
         </tbody>
+        <tfoot>
+          ${totalsRow}
+        </tfoot>
       </table>
     </div>
   `;
