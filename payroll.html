@@ -1649,6 +1649,7 @@ let currentPaystubContext = null;  // { employeeId, pp } when viewing a paystub
 let runPayrollSelectedEmp = null;  // employee id currently being edited in Run Payroll; null = picker view
 let taxFilingsSelection = null;    // { year, quarter } selected on Tax Filings page; null = default to current quarter
 let yearEndSelection = null;       // [WG-3] { year } selected on Year-End page; null = default to most recent year with data
+let payPeriodSummarySelection = null;  // [PS-1] { pp } selected on Total Paystub page; null = default to most recent finalized PP
 let activityLogFilter = { employeeId: 'all', eventType: 'all' };  // [AL-3] Activity Log filters
 
 // ============================================================================
@@ -1782,6 +1783,22 @@ function paystubsInQuarter(emp, year, quarter) {
     yearOfDate(p.end_date) === year &&
     quarterOfDate(p.end_date) === quarter
   );
+}
+
+// [PS-1] Returns a deduplicated, sorted list of pay periods that have at
+// least one active (non-voided) paystub across any employee. Each entry is
+// the full period object (taken from the first matching emp.periods row),
+// so callers can read pp, end_date, etc. without a second lookup. Sorted
+// ascending by pp number — the dropdown will show oldest at the top.
+function periodsWithFinalizedPaystubs() {
+  const seen = new Map();
+  STATE.employees.forEach(emp => {
+    emp.periods.forEach(p => {
+      if (!isPaystubActive(p)) return;
+      if (!seen.has(p.pp)) seen.set(p.pp, p);
+    });
+  });
+  return Array.from(seen.values()).sort((a, b) => a.pp - b.pp);
 }
 
 // --------------------------------------------------------------------------
@@ -2957,16 +2974,59 @@ function renderPayPeriodSummary() {
   // here, so we double-check at render time.
   if (currentUserRole !== 'admin') return renderNonAdminStub();
 
+  // [PS-1b] Period selector. List every PP that has at least one active
+  // paystub. Default selection is the most recent period (highest pp);
+  // module state overrides default so navigating away and back preserves
+  // the user's choice within a session.
+  const periods = periodsWithFinalizedPaystubs();
+  if (periods.length === 0) {
+    return `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Total Paystub</div>
+          <div class="page-sub">Combined view of all employees' pay for a single period.</div>
+        </div>
+      </div>
+      <div class="empty" style="padding:32px; text-align:center;">
+        No finalized paystubs yet. Run a payroll first — totals will appear
+        here once at least one paystub is finalized.
+      </div>
+    `;
+  }
+
+  const latest = periods[periods.length - 1];
+  const selected = payPeriodSummarySelection
+    ? (periods.find(p => p.pp === payPeriodSummarySelection.pp) || latest)
+    : latest;
+
+  // Label format: "PP9 · Apr 18 – May 1". periodStart() derives start from
+  // end_date by subtracting 13 days (matches our biweekly cadence).
+  const periodLabel = p => {
+    const start = periodStart(p.end_date);
+    return `PP${p.pp} · ${formatDateShort(start)} – ${formatDateShort(p.end_date)}`;
+  };
+
+  const options = periods.map(p => {
+    const sel = p.pp === selected.pp ? ' selected' : '';
+    return `<option value="${p.pp}"${sel}>${periodLabel(p)}</option>`;
+  }).join("");
+
   return `
     <div class="page-header">
       <div>
         <div class="page-title">Total Paystub</div>
         <div class="page-sub">Combined view of all employees' pay for a single period.</div>
       </div>
+      <div class="quarter-select-wrap">
+        <label class="quarter-select-label" for="pay-period-summary-pp">Pay Period</label>
+        <select id="pay-period-summary-pp" class="quarter-select" onchange="selectPayPeriodSummaryPP(this.value)">
+          ${options}
+        </select>
+      </div>
     </div>
     <div class="empty" style="padding:32px; text-align:center; line-height:1.6;">
-      <div style="font-weight:600; color:var(--text); margin-bottom:8px;">PS-1a shell in place.</div>
-      <div>Period selector, per-employee table, and totals coming in PS-1b through PS-1e.</div>
+      <div style="font-weight:600; color:var(--text); margin-bottom:8px;">PS-1b dropdown ready · Selected PP${selected.pp}</div>
+      <div>Per-employee summary table coming in PS-1c.</div>
     </div>
   `;
 }
@@ -3695,6 +3755,19 @@ function selectTaxFilingsQuarter(key) {
   taxFilingsSelection = { year: parts[0], quarter: parts[1] };
   const main = document.getElementById("main-content");
   if (main) main.innerHTML = renderTaxFilings();
+}
+
+// [PS-1] onchange handler for the Total Paystub period selector. Stores the
+// user's pick in the module variable, then re-renders the page so options
+// reflect the new selection (the matching <option> gets the "selected"
+// attribute on next render).
+function selectPayPeriodSummaryPP(value) {
+  if (!value) return;
+  const pp = Number(value);
+  if (isNaN(pp)) return;
+  payPeriodSummarySelection = { pp };
+  const main = document.getElementById("main-content");
+  if (main) main.innerHTML = renderPayPeriodSummary();
 }
 
 function renderPaystub(employeeId, pp) {
