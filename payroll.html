@@ -5919,6 +5919,35 @@ async function finalizePP(employeeId, btnEl) {
     return;
   }
 
+  // [BUG-11] Sanity-check unusually long shifts. hoursFromClocks() assumes
+  // ANY clock_out earlier than clock_in is overnight (+24h), so a single
+  // AM/PM typo (e.g. "3:00 AM" instead of "3:00 PM") silently inflates a
+  // ~6-hour shift into a ~21-hour shift. At $25/hr that's a $375 paystub
+  // error per typo. Threshold of 16 hours catches plausible AM/PM mistakes
+  // while still allowing genuine long shifts (e.g. 14-hour audit-season
+  // pushes). Admin can confirm if these are real, or cancel to fix the
+  // entries on Run Payroll.
+  const suspiciousShifts = (entry.time_entries || [])
+    .map(te => ({
+      date:  te.work_date || te.date || '',
+      hours: hoursFromClocks(te.clock_in, te.clock_out),
+      in:    te.clock_in || '',
+      out:   te.clock_out || '',
+    }))
+    .filter(s => s.hours > 16);
+  if (suspiciousShifts.length > 0) {
+    const lines = suspiciousShifts
+      .map(s => `  • ${s.date}: ${s.in} → ${s.out} = ${s.hours.toFixed(2)} hr`)
+      .join('\n');
+    const msg =
+      `${suspiciousShifts.length} time entr${suspiciousShifts.length === 1 ? 'y looks' : 'ies look'} unusually long ` +
+      `(over 16 hours). Common cause: AM/PM typo (e.g. typing "3:00 AM" instead of "3:00 PM").\n\n` +
+      `${lines}\n\n` +
+      `Click OK if these are correct (e.g. genuine overnight shifts).\n` +
+      `Click Cancel to go back and fix them on Run Payroll.`;
+    if (!confirm(msg)) return;
+  }
+
   const period = buildPeriodFromDraft(emp, entry);
   const existingIdx = emp.periods.findIndex(p => p.pp === period.pp);
 
