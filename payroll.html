@@ -5689,8 +5689,27 @@ function renderPreviewPaystub(employeeId) {
   const period = buildPeriodFromDraft(emp, entry);
   const ytdPrior = priorYtdGrossFor(emp, period.pp);
   const status = currentPeriodStatus();
-  const finalizeDisabled = status.inProgress;
-  const finalizeTip = finalizeDisabled ? `PP${period.pp} ends ${formatDate(status.endDate)} — can't finalize yet` : `Finalize PP${period.pp}`;
+  // [BUG-6] Disable Finalize when EITHER:
+  //   1. The period hasn't ended yet (existing behavior — status.inProgress).
+  //   2. STATE.current_period.pay_period_id is missing in cloud mode. The
+  //      same check exists inside finalizePP (line ~5928 throws if absent),
+  //      but the user would briefly see the button spin then get an error
+  //      toast. Disabling up front prevents the spinner UX cliff entirely
+  //      and gives a clear tooltip explaining what to do.
+  // Dev mode (file://) skips the cloud check since there's no Supabase ID
+  // to wait on.
+  const isFinalizeDevMode = window.location.protocol === 'file:';
+  const noCloudId = !isFinalizeDevMode && (!STATE.current_period || !STATE.current_period.pay_period_id);
+  const finalizeDisabled = status.inProgress || noCloudId;
+
+  let finalizeTip;
+  if (status.inProgress) {
+    finalizeTip = `PP${period.pp} ends ${formatDate(status.endDate)} — can't finalize yet`;
+  } else if (noCloudId) {
+    finalizeTip = `Pay period not synced from cloud yet. Refresh the page (Ctrl+Shift+R) and try again.`;
+  } else {
+    finalizeTip = `Finalize PP${period.pp}`;
+  }
   const finalizeAttrs = finalizeDisabled ? `disabled title="${finalizeTip}"` : `onclick="finalizePP('${emp.id}', this)" title="${finalizeTip}"`;
   const statusWord = finalizeDisabled
     ? `<strong style="color:var(--primary)">In progress — ends ${formatDate(status.endDate)}</strong>`
