@@ -7557,6 +7557,123 @@ function wouldSsCapRippleAffectLaterPaystubs(emp, pp, oldGross, newGross) {
   return false;
 }
 
+// [BUG-1] Recompute downstream paystubs after an edit changes their YTD basis.
+//
+// Why this exists: the wage-base cap math (SS at $184,500, SUTA/ETT/FUTA at
+// $7,000) depends on cumulative YTD gross pay through the prior period. When
+// admin edits an OLD paystub's gross, every later paystub's tax calculation
+// is now stale — the cap math was based on a YTD value that just changed.
+//
+// Scope:
+//   - Same employee
+//   - pp > editedPp
+//   - Same calendar year as the edit (caps reset Jan 1)
+//   - Active (non-voided) only — voided rows aren't part of YTD anyway
+//
+// Asks admin to confirm before recomputing. Each downstream paystub is
+// recomputed independently — if one fails, the others still proceed.
+// Reports a summary in the returned object so the caller can show a toast.
+//
+// Returns: { recomputed: [pp...], skipped: [pp...], failed: [{pp, error}...] }
+async function recomputeDownstreamPaystubs(emp, editedPp) {
+  const editedPeriod = emp.periods.find(p => p.pp === editedPp);
+  if (!editedPeriod) {
+    return { recomputed: [], skipped: [], failed: [] };
+  }
+  const editedYear = yearOfDate(editedPeriod.end_date);
+
+  // Sort ascending so each downstream sees the prior recomputed values
+  // baked into priorYtdGrossFor().
+  const downstream = emp.periods
+    .filter(p =>
+      p.pp > editedPp &&
+      isPaystubActive(p) &&
+      yearOfDate(p.end_date) === editedYear
+    )
+    .sort((a, b) => a.pp - b.pp);
+
+  if (downstream.length === 0) {
+    return { recomputed: [], skipped: [], failed: [] };
+  }
+
+  const ok = confirm(
+    `${downstream.length} later paystub${downstream.length === 1 ? '' : 's'} ` +
+    `for ${emp.name} may need tax recomputation now that PP${editedPp}'s gross changed:\n\n` +
+    `  Affected: ${downstream.map(p => 'PP' + p.pp).join(', ')}\n\n` +
+    `Click OK to auto-recompute taxes on each (gross/hours stay the same — only ` +
+    `the cap-affected tax components change).\n` +
+    `Click Cancel to skip — you can manually open each later paystub and click ` +
+    `Edit → Save Changes to refresh them one at a time.`
+  );
+  if (!ok) {
+    return { recomputed: [], skipped: downstream.map(p => p.pp), failed: [] };
+  }
+
+  const recomputed = [];
+  const failed     = [];
+  const isDevMode  = window.location.protocol === 'file:';
+
+  for (const p of downstream) {
+    try {
+      // priorYtdGrossFor uses `< pp` and skips voided. The just-edited
+      // upstream paystub is already in STATE at its new value, so the basis
+      // is correct.
+      const priorYtd          = priorYtdGrossFor(emp, p.pp);
+      const newTaxes          = calcPaystubTaxes(p.gross_pay, priorYtd);
+      const newEmployerTaxes  = calcEmployerTaxes(p.gross_pay, priorYtd);
+      const totalEeTaxes      = newTaxes.federal + newTaxes.ca_state + newTaxes.ss + newTaxes.medicare + newTaxes.ca_sdi;
+      const grossPlusReimb    = round2((p.gross_pay || 0) + (p.mileage_dollars || 0) + (p.reimbursement || 0));
+      const newNetPay         = round2(grossPlusReimb - totalEeTaxes);
+
+      // Skip if no material change (cap math wasn't relevant for this row).
+      // Tolerance = $0.005 so penny-rounding noise doesn't trigger writes.
+      const oldSuta = (p.employer_taxes && p.employer_taxes.suta) || 0;
+      const noChange =
+        Math.abs(newNetPay     - (p.net_pay  || 0))    < 0.005 &&
+        Math.abs(newTaxes.ss   - (p.taxes && p.taxes.ss   || 0)) < 0.005 &&
+        Math.abs(newEmployerTaxes.suta - oldSuta) < 0.005;
+      if (noChange) continue;
+
+      // Cloud write first — same pattern as the main edit flow above.
+      if (!isDevMode && p.paystub_id) {
+        await DAL.updatePaystub(p.paystub_id, {
+          // hours/gross/miles/reimb intentionally NOT updated — only the
+          // tax math is recomputed. The user-entered values are preserved.
+          fit:                   newTaxes.federal,
+          ca_pit:                newTaxes.ca_state,
+          ss_ee:                 newTaxes.ss,
+          medicare_ee:           newTaxes.medicare,
+          sdi:                   newTaxes.ca_sdi,
+          net_pay:               newNetPay,
+          ss_er:                 newEmployerTaxes.ss_er,
+          medicare_er:           newEmployerTaxes.medicare_er,
+          suta:                  newEmployerTaxes.suta,
+          ett:                   newEmployerTaxes.ett,
+          futa:                  newEmployerTaxes.futa,
+        });
+      }
+
+      // Mirror into STATE on success. The audit trigger we added earlier
+      // populates last_edited_at/by automatically on every UPDATE.
+      p.taxes            = newTaxes;
+      p.employer_taxes   = newEmployerTaxes;
+      p.net_pay          = newNetPay;
+      p.gross_plus_reimb = grossPlusReimb;
+      p.edited_at        = nowIsoShort();
+
+      recomputed.push(p.pp);
+    } catch (err) {
+      console.error(`[BUG-1] Recompute failed for PP${p.pp}:`, err);
+      failed.push({ pp: p.pp, error: err.message || String(err) });
+    }
+  }
+
+  if (recomputed.length > 0) saveState(STATE);
+
+  return { recomputed, skipped: [], failed };
+}
+
+
 async function submitEditPaystub() {
   if (!requireAdmin('Save Paystub Edit')) return;
 
@@ -7611,12 +7728,17 @@ async function submitEditPaystub() {
   const newNetPay = round2(gross_plus_reimb - totalEeTaxes);
 
   // --- SS cap ripple warning ---
+  // [BUG-1] After the main edit saves, recomputeDownstreamPaystubs() (called
+  // below) will offer to auto-recompute later paystubs whose taxes are now
+  // stale. This warning gives admin a heads-up BEFORE they save so they can
+  // bail out if they didn't realize the edit would have wider impact.
   if (Math.abs(oldGross - newGross) > 0.005 && wouldSsCapRippleAffectLaterPaystubs(emp, pp, oldGross, newGross)) {
     const ok = confirm(
       `Heads up: changing PP${pp}'s gross pay will affect Social Security on later paystubs ` +
       `because you're near the annual SS wage base cap (${money(STATE.tax_rates.ss_wage_base)}).\n\n` +
-      `This edit will save, but later paystubs' SS amounts are now stale — you'll need to open each one ` +
-      `and click Edit → Save Changes to refresh them.\n\nContinue?`
+      `This edit will save, and you'll then be asked whether to auto-recompute the ` +
+      `affected later paystubs. (Older behavior was manual fix-up; the auto-recompute ` +
+      `is new in BUG-1.)\n\nContinue?`
     );
     if (!ok) return;
   }
@@ -7685,8 +7807,39 @@ async function submitEditPaystub() {
     // p.pp, p.end_date, p.voided intentionally untouched
 
     saveState(STATE);
+
+    // [BUG-1] After the upstream edit lands, offer to cascade-recompute
+    // later paystubs whose YTD basis just changed. Only kicks in if there
+    // ARE later paystubs and admin confirms; otherwise it's a silent no-op.
+    // Wrapped in its own try so a recompute failure can't undo the edit
+    // we already saved successfully above.
+    let cascadeMsg = '';
+    let cascadeKind = 'success';
+    try {
+      const cascade = await recomputeDownstreamPaystubs(emp, pp);
+      if (cascade.recomputed.length > 0 || cascade.failed.length > 0) {
+        const parts = [];
+        if (cascade.recomputed.length > 0) {
+          parts.push(`Recomputed: ${cascade.recomputed.map(n => 'PP' + n).join(', ')}.`);
+        }
+        if (cascade.failed.length > 0) {
+          parts.push(`Failed: ${cascade.failed.map(f => `PP${f.pp}`).join(', ')} — open each and click Edit → Save Changes to retry.`);
+          cascadeKind = 'warning';
+        }
+        cascadeMsg = parts.join(' ');
+      }
+    } catch (cascadeErr) {
+      console.error('[BUG-1] recomputeDownstreamPaystubs threw:', cascadeErr);
+      cascadeMsg = 'Edit saved, but downstream recompute failed. Open later paystubs and click Edit → Save Changes to refresh.';
+      cascadeKind = 'warning';
+    }
+
     closeEditPaystubModal();
     viewPaystub(employeeId, pp);  // re-render so user sees the updated numbers + "Edited on ..." note
+
+    // Show the cascade summary AFTER navigation so the toast survives the
+    // re-render. Skipped silently when nothing downstream changed.
+    if (cascadeMsg) showToast(cascadeMsg, cascadeKind, 6000);
   } catch (err) {
     console.error('[4f-7] updatePaystub failed:', err);
     showToast('Could not save changes — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
