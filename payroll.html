@@ -5048,6 +5048,14 @@ async function syncDraftToCloud(employeeId, signal) {
 // on the same date). Drops the unique-per-day constraint and reverts to
 // wipe-and-insert. Still fast because the AS-10 RLS fix made the underlying
 // queries cheap.
+// [BUG-WI-1] Atomic replace via Postgres RPC. The previous DELETE+INSERT
+// pattern was two separate HTTP requests — if the connection blipped between
+// them (common on mobile), the wipe succeeded and the re-insert never landed.
+// Result: cloud silently lost the data while localStorage still held it.
+//
+// The RPC functions below do both steps inside a single Postgres transaction,
+// so it's all-or-nothing. RLS still applies (functions are SECURITY INVOKER),
+// so users can only replace data on timesheets they're authorized for.
 async function syncTimeEntriesUpsert(timesheetId, localEntries, signal) {
   const rows = [];
   for (const te of localEntries) {
@@ -5057,35 +5065,29 @@ async function syncTimeEntriesUpsert(timesheetId, localEntries, signal) {
     if (inMin === null || outMin === null) continue;
     const hours     = hoursFromClocks(te.clock_in, te.clock_out);
     const overnight = outMin < inMin;
+    // No timesheet_id in each row — the RPC takes it as a separate parameter.
     rows.push({
-      timesheet_id: timesheetId,
-      work_date:    te.date,
-      clock_in:     te.clock_in,
-      clock_out:    te.clock_out,
+      work_date: te.date,
+      clock_in:  te.clock_in,
+      clock_out: te.clock_out,
       overnight,
       hours,
-      notes:        (te.notes || '').trim() || null,
+      notes:     (te.notes || '').trim() || null,
     });
   }
 
-  console.log(`[diag-AS]   te.wipe START`);
-  let delQ = supabaseClient.from('time_entries').delete().eq('timesheet_id', timesheetId);
-  if (signal) delQ = delQ.abortSignal(signal);
-  const { error: delErr } = await delQ;
-  if (delErr) throw delErr;
-  console.log(`[diag-AS]   te.wipe DONE`);
-
-  if (rows.length > 0) {
-    console.log(`[diag-AS]   te.insert (${rows.length} rows) START`);
-    let insQ = supabaseClient.from('time_entries').insert(rows);
-    if (signal) insQ = insQ.abortSignal(signal);
-    const { error: insErr } = await insQ;
-    if (insErr) throw insErr;
-    console.log(`[diag-AS]   te.insert DONE`);
-  }
+  console.log(`[diag-AS]   te.replace (${rows.length} rows) START`);
+  let q = supabaseClient.rpc('replace_time_entries', {
+    p_timesheet_id: timesheetId,
+    p_entries:      rows,
+  });
+  if (signal) q = q.abortSignal(signal);
+  const { error } = await q;
+  if (error) throw error;
+  console.log(`[diag-AS]   te.replace DONE`);
 }
 
-// ---- AS-5: Mileage sync — wipe + replace (small table, no natural key) -----
+// ---- BUG-WI-1: Mileage sync — atomic replace via RPC ----------------------
 async function syncMileageWipeReplace(timesheetId, localEntries, signal) {
   const rows = [];
   for (const m of localEntries) {
@@ -5093,25 +5095,21 @@ async function syncMileageWipeReplace(timesheetId, localEntries, signal) {
     const miles = Number(m.miles || 0);
     if (!miles) continue;
     rows.push({
-      timesheet_id: timesheetId,
-      entry_date:   m.date,
+      entry_date:  m.date,
       miles,
-      description:  (m.description || '').trim() || null,
+      description: (m.description || '').trim() || null,
     });
   }
-  let delQ = supabaseClient.from('mileage_entries').delete().eq('timesheet_id', timesheetId);
-  if (signal) delQ = delQ.abortSignal(signal);
-  const { error: delErr } = await delQ;
-  if (delErr) throw delErr;
-  if (rows.length > 0) {
-    let insQ = supabaseClient.from('mileage_entries').insert(rows);
-    if (signal) insQ = insQ.abortSignal(signal);
-    const { error: insErr } = await insQ;
-    if (insErr) throw insErr;
-  }
+  let q = supabaseClient.rpc('replace_mileage_entries', {
+    p_timesheet_id: timesheetId,
+    p_entries:      rows,
+  });
+  if (signal) q = q.abortSignal(signal);
+  const { error } = await q;
+  if (error) throw error;
 }
 
-// ---- AS-5: Reimbursements sync — wipe + replace ----------------------------
+// ---- BUG-WI-1: Reimbursements sync — atomic replace via RPC ---------------
 async function syncReimbursementsWipeReplace(timesheetId, localEntries, signal) {
   const rows = [];
   for (const r of localEntries) {
@@ -5121,22 +5119,18 @@ async function syncReimbursementsWipeReplace(timesheetId, localEntries, signal) 
     const amount = Number(r.amount || 0);
     if (!amount) continue;
     rows.push({
-      timesheet_id: timesheetId,
       description,
       amount,
       receipt_file_path: r.receipt_file_path || null,
     });
   }
-  let delQ = supabaseClient.from('reimbursements').delete().eq('timesheet_id', timesheetId);
-  if (signal) delQ = delQ.abortSignal(signal);
-  const { error: delErr } = await delQ;
-  if (delErr) throw delErr;
-  if (rows.length > 0) {
-    let insQ = supabaseClient.from('reimbursements').insert(rows);
-    if (signal) insQ = insQ.abortSignal(signal);
-    const { error: insErr } = await insQ;
-    if (insErr) throw insErr;
-  }
+  let q = supabaseClient.rpc('replace_reimbursements', {
+    p_timesheet_id: timesheetId,
+    p_entries:      rows,
+  });
+  if (signal) q = q.abortSignal(signal);
+  const { error } = await q;
+  if (error) throw error;
 }
 
 // Nuke an employee's draft rows in the cloud WITHOUT re-inserting anything.
