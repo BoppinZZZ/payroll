@@ -4512,20 +4512,12 @@ async function handleReceiptFileSelect(employeeId, idx, fileInput) {
   refreshRunPayroll();
 
   try {
-    // [SESS-3] Flush any in-flight draft sync BEFORE the upload. Concurrent
-    // replace_reimbursements (from debounced auto-save) + storage RLS
-    // evaluation can deadlock at the row-lock level: the sync holds locks
-    // on reimbursements; the upload's RLS read waits behind them; if the
-    // sync's HTTP request aborts mid-flight (visibility change, network
-    // blip), the Postgres session can go "idle in transaction" and never
-    // release the locks — causing the upload to hang forever until the
-    // user signs out (which closes the connection and rolls it back).
-    // Flushing + awaiting the queued sync first guarantees no overlapping
-    // transaction. flushDraftSync cancels any pending debounce timer;
-    // queueDraftSync awaits the single-flight loop to settle.
-    flushDraftSync(employeeId);
-    await queueDraftSync(employeeId);
-
+    // [SESS-3 REVERTED] Earlier attempt to flush draft sync before upload
+    // turned out to MAKE things worse — the queueDraftSync await would
+    // sometimes hang on a replace_time_entries RPC that never resolved,
+    // preventing the upload from even starting. The atomic replace
+    // functions (BUG-WI-1) already prevent orphan transactions, so this
+    // pre-flush was redundant. Reverted: upload fires immediately.
     const newPath = await DAL.uploadReceiptFile(employeeId, file);
 
     // If the row already had a file (replacement case), delete the old one
