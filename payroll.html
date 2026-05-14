@@ -9547,23 +9547,74 @@ const DAL = {
     const randomSuffix = Math.random().toString(36).slice(2, 10);
     const path = `${employeeId}/${timestamp}_${randomSuffix}.${ext}`;
 
-    // [SESS-1] Refresh auth token before storage RLS evaluation. Without
-    // this, sessions that have sat idle (or survived a sleep/lock cycle)
-    // sometimes hold a token that the storage RLS evaluator can't validate,
-    // causing the upload to hang silently. refreshSession() is a no-op when
-    // the token is fresh, so this is cheap (~50ms) in the healthy case.
-    // Wrapped in try/catch so a refresh failure doesn't block the upload —
-    // we'd rather attempt and surface a clear error than refuse outright.
-    try { await supabaseClient.auth.refreshSession(); }
-    catch (e) { console.warn('[SESS-1] auth refresh failed before upload (continuing):', e); }
+    // [SESS-5] Use plain fetch() directly against the Storage REST API
+    // instead of supabaseClient.storage.upload(). We chased a "spinner
+    // hangs forever" bug through 4 fixes (SESS-1/2/3/4) — server-side RLS
+    // is correct, client-side token refresh runs, but the supabase-js
+    // storage client occasionally gets into an internal state where
+    // .upload() never makes the fetch (no request in Network tab) and
+    // never resolves. Only sign-out + sign-in unblocks it.
+    //
+    // This bypass uses fetch() directly. The endpoint and auth scheme are
+    // public and stable. Reads the access_token from localStorage so we
+    // don't go through the supabase-js auth client either — fully avoiding
+    // the suspected stuck state.
+    //
+    // AbortController + 60s timeout ensures the upload can never hang
+    // longer than that — the spinner will resolve to a clear error.
+    let token = null;
+    try {
+      const sessionResult = await supabaseClient.auth.getSession();
+      token = sessionResult?.data?.session?.access_token || null;
+    } catch (_e) {
+      // Fall through to localStorage fallback below.
+    }
+    if (!token) {
+      // Fallback: read the JWT from localStorage where supabase-js stores it.
+      // The key is `sb-${projectRef}-auth-token` (sometimes with a suffix).
+      // We scan all keys to be robust.
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k || !k.startsWith('sb-')) continue;
+        try {
+          const raw = localStorage.getItem(k);
+          const parsed = raw ? JSON.parse(raw) : null;
+          if (parsed && parsed.access_token) { token = parsed.access_token; break; }
+          if (parsed && parsed.currentSession && parsed.currentSession.access_token) {
+            token = parsed.currentSession.access_token;
+            break;
+          }
+        } catch (_e) { /* keep scanning */ }
+      }
+    }
+    if (!token) {
+      throw new Error('Not signed in (no access token available). Please sign out and back in.');
+    }
 
-    const { error } = await supabaseClient.storage
-      .from('receipts')
-      .upload(path, file, {
-        contentType: file.type,
-        upsert: false,
+    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/receipts/${encodeURI(path)}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort('upload-timeout'), 60000);
+    let response;
+    try {
+      response = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type':  file.type || 'application/octet-stream',
+          'x-upsert':      'false',
+          'apikey':        SUPABASE_ANON_KEY,
+        },
+        body: file,
+        signal: controller.signal,
       });
-    if (error) throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`Upload failed (${response.status}): ${detail || response.statusText}`);
+    }
     return path;
   },
 
