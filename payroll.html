@@ -9270,6 +9270,43 @@ window._payroll = { STATE, INITIAL_DATA, ytdTotals, showView, viewPaystub };
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 
+// [SESS-5] Read the auth access token in the safest way possible:
+//   1. Try supabaseClient.auth.getSession() (the supported API).
+//   2. If that fails or returns null, scan localStorage for the supabase-js
+//      session blob (key starts with "sb-") and extract access_token directly.
+// We use this for fetch()-based storage operations (upload/delete/signed URL)
+// because supabase-js's storage client can wedge in a stuck-state where its
+// own session retrieval hangs. The localStorage fallback always works as long
+// as the user has a valid session cached.
+async function getStorageAccessToken() {
+  let token = null;
+  try {
+    const sessionResult = await supabaseClient.auth.getSession();
+    token = sessionResult && sessionResult.data && sessionResult.data.session
+      ? sessionResult.data.session.access_token
+      : null;
+  } catch (_e) {
+    // Fall through to localStorage scan below.
+  }
+  if (!token) {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith('sb-')) continue;
+      try {
+        const raw = localStorage.getItem(k);
+        const parsed = raw ? JSON.parse(raw) : null;
+        if (parsed && parsed.access_token) { token = parsed.access_token; break; }
+        if (parsed && parsed.currentSession && parsed.currentSession.access_token) {
+          token = parsed.currentSession.access_token;
+          break;
+        }
+      } catch (_e) { /* keep scanning */ }
+    }
+  }
+  return token;
+}
+
+
 // ============================================================================
 // ---- PHASE 4 CHUNK 4d — DATA ACCESS LAYER (DAL) ----
 // ============================================================================
@@ -9562,31 +9599,7 @@ const DAL = {
     //
     // AbortController + 60s timeout ensures the upload can never hang
     // longer than that — the spinner will resolve to a clear error.
-    let token = null;
-    try {
-      const sessionResult = await supabaseClient.auth.getSession();
-      token = sessionResult?.data?.session?.access_token || null;
-    } catch (_e) {
-      // Fall through to localStorage fallback below.
-    }
-    if (!token) {
-      // Fallback: read the JWT from localStorage where supabase-js stores it.
-      // The key is `sb-${projectRef}-auth-token` (sometimes with a suffix).
-      // We scan all keys to be robust.
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (!k || !k.startsWith('sb-')) continue;
-        try {
-          const raw = localStorage.getItem(k);
-          const parsed = raw ? JSON.parse(raw) : null;
-          if (parsed && parsed.access_token) { token = parsed.access_token; break; }
-          if (parsed && parsed.currentSession && parsed.currentSession.access_token) {
-            token = parsed.currentSession.access_token;
-            break;
-          }
-        } catch (_e) { /* keep scanning */ }
-      }
-    }
+    const token = await getStorageAccessToken();
     if (!token) {
       throw new Error('Not signed in (no access token available). Please sign out and back in.');
     }
@@ -9621,32 +9634,81 @@ const DAL = {
   // Delete a receipt file by storage path. Safe to call with a non-existent
   // path — Supabase returns success (idempotent). Used when the user removes
   // a receipt or replaces it with a new file.
+  // [SESS-5] Uses plain fetch() to bypass the supabase-js storage client
+  // (same hang reason as uploadReceiptFile — supabase-js storage internals
+  // can get stuck and require sign-out to recover).
   async deleteReceiptFile(path) {
     if (!path) return;
     if (window.location.protocol === 'file:') return;  // Dev mode no-op
-    // [SESS-1] See uploadReceiptFile above — same stale-session protection.
-    try { await supabaseClient.auth.refreshSession(); }
-    catch (e) { console.warn('[SESS-1] auth refresh failed before delete (continuing):', e); }
-    const { error } = await supabaseClient.storage
-      .from('receipts')
-      .remove([path]);
-    if (error) throw error;
+
+    const token = await getStorageAccessToken();
+    if (!token) throw new Error('Not signed in (no access token available). Please sign out and back in.');
+
+    const url = `${SUPABASE_URL}/storage/v1/object/receipts/${encodeURI(path)}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort('delete-timeout'), 30000);
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'apikey':        SUPABASE_ANON_KEY,
+        },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    // 404 = file already gone; treat as success (idempotent).
+    if (!response.ok && response.status !== 404) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`Delete failed (${response.status}): ${detail || response.statusText}`);
+    }
   },
 
   // Generate a short-lived signed URL so the user can view/download a
   // receipt. URL expires after `expiresInSeconds` (default 1 hour). Returns
   // null if no path was given so callers can `if (!url) return;` cleanly.
+  // [SESS-5] Uses plain fetch() — same reason as uploadReceiptFile.
   async getSignedReceiptUrl(path, expiresInSeconds = 3600) {
     if (!path) return null;
     if (window.location.protocol === 'file:') return null;
-    // [SESS-1] See uploadReceiptFile above — same stale-session protection.
-    try { await supabaseClient.auth.refreshSession(); }
-    catch (e) { console.warn('[SESS-1] auth refresh failed before signed URL (continuing):', e); }
-    const { data, error } = await supabaseClient.storage
-      .from('receipts')
-      .createSignedUrl(path, expiresInSeconds);
-    if (error) throw error;
-    return data && data.signedUrl ? data.signedUrl : null;
+
+    const token = await getStorageAccessToken();
+    if (!token) throw new Error('Not signed in (no access token available). Please sign out and back in.');
+
+    const url = `${SUPABASE_URL}/storage/v1/object/sign/receipts/${encodeURI(path)}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort('sign-timeout'), 30000);
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type':  'application/json',
+          'apikey':        SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ expiresIn: expiresInSeconds }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`Sign URL failed (${response.status}): ${detail || response.statusText}`);
+    }
+
+    const data = await response.json();
+    // The Storage REST API returns "signedURL" as a relative path
+    // (e.g. "/object/sign/receipts/abc/xyz.pdf?token=..."). Prepend the
+    // storage base URL to get a full URL the browser can open.
+    const relative = data && (data.signedURL || data.signedUrl);
+    return relative ? `${SUPABASE_URL}/storage/v1${relative}` : null;
   },
 
 
