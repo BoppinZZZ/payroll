@@ -9541,6 +9541,16 @@ const DAL = {
     const randomSuffix = Math.random().toString(36).slice(2, 10);
     const path = `${employeeId}/${timestamp}_${randomSuffix}.${ext}`;
 
+    // [SESS-1] Refresh auth token before storage RLS evaluation. Without
+    // this, sessions that have sat idle (or survived a sleep/lock cycle)
+    // sometimes hold a token that the storage RLS evaluator can't validate,
+    // causing the upload to hang silently. refreshSession() is a no-op when
+    // the token is fresh, so this is cheap (~50ms) in the healthy case.
+    // Wrapped in try/catch so a refresh failure doesn't block the upload —
+    // we'd rather attempt and surface a clear error than refuse outright.
+    try { await supabaseClient.auth.refreshSession(); }
+    catch (e) { console.warn('[SESS-1] auth refresh failed before upload (continuing):', e); }
+
     const { error } = await supabaseClient.storage
       .from('receipts')
       .upload(path, file, {
@@ -9557,6 +9567,9 @@ const DAL = {
   async deleteReceiptFile(path) {
     if (!path) return;
     if (window.location.protocol === 'file:') return;  // Dev mode no-op
+    // [SESS-1] See uploadReceiptFile above — same stale-session protection.
+    try { await supabaseClient.auth.refreshSession(); }
+    catch (e) { console.warn('[SESS-1] auth refresh failed before delete (continuing):', e); }
     const { error } = await supabaseClient.storage
       .from('receipts')
       .remove([path]);
@@ -9569,6 +9582,9 @@ const DAL = {
   async getSignedReceiptUrl(path, expiresInSeconds = 3600) {
     if (!path) return null;
     if (window.location.protocol === 'file:') return null;
+    // [SESS-1] See uploadReceiptFile above — same stale-session protection.
+    try { await supabaseClient.auth.refreshSession(); }
+    catch (e) { console.warn('[SESS-1] auth refresh failed before signed URL (continuing):', e); }
     const { data, error } = await supabaseClient.storage
       .from('receipts')
       .createSignedUrl(path, expiresInSeconds);
