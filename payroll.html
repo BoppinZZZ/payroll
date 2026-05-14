@@ -11307,13 +11307,30 @@ async function hydrateAndRender() {
         const local = JSON.parse(localJson);
         if (local && local.draft_period && STATE.current_period
             && local.draft_period.pp === STATE.current_period.pp) {
-          const cloudEntries = STATE.draft_period?.entries || {};
-          const localEntries = local.draft_period.entries || {};
+          // [LF-4] Only restore localStorage entries that have ACTUAL user-typed
+          // data. Hydrate creates placeholder entries (padded blank rows) for
+          // every employee, and those get persisted to localStorage on saveState.
+          // Without this filter, those placeholders would override fresh cloud
+          // data from other employees on every hydrate — the admin's view of
+          // a co-worker's draft would always be stuck at the snapshot from the
+          // admin's LAST page load.
+          //
+          // draftEntryHasData() checks for any non-empty clock_in / miles /
+          // reimbursement — so an entry with real typed values survives, while
+          // a hydrated blank placeholder does not.
+          const cloudEntries  = STATE.draft_period?.entries || {};
+          const localEntries  = local.draft_period.entries || {};
+          const meaningfulLocal = {};
+          for (const [empId, entry] of Object.entries(localEntries)) {
+            if (draftEntryHasData(entry)) {
+              meaningfulLocal[empId] = entry;
+            }
+          }
           STATE.draft_period = {
             ...STATE.draft_period,
-            entries: { ...cloudEntries, ...localEntries },
+            entries: { ...cloudEntries, ...meaningfulLocal },
           };
-          console.log('[LF-1] restored draft from localStorage (savedAt=' + new Date(local.savedAt).toLocaleTimeString() + ')');
+          console.log('[LF-1] restored draft from localStorage (savedAt=' + new Date(local.savedAt).toLocaleTimeString() + ', meaningful entries=' + Object.keys(meaningfulLocal).length + ')');
         }
       }
     } catch (e) {
