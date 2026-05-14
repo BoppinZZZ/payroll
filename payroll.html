@@ -557,6 +557,21 @@
 
   /* ---------- Employee Add/Edit Modal (Step 2a) ---------- */
   .emp-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15, 23, 42, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+
+  /* [RV-1] In-app receipt viewer modal. Larger than .emp-modal because it
+     displays full images and PDFs; higher z-index so it sits above any
+     other modal that might be open at the time. */
+  .receipt-viewer-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15, 23, 42, 0.75); display: flex; align-items: center; justify-content: center; z-index: 1100; padding: 20px; }
+  .receipt-viewer-content { background: white; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.4); width: 100%; max-width: 960px; max-height: 92vh; display: flex; flex-direction: column; }
+  .receipt-viewer-header  { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .receipt-viewer-title   { font-size: 14px; color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%; }
+  .receipt-viewer-close   { background: none; border: none; font-size: 28px; color: var(--muted); cursor: pointer; line-height: 1; padding: 0 8px; }
+  .receipt-viewer-close:hover { color: var(--text); }
+  .receipt-viewer-body    { flex: 1; min-height: 200px; overflow: auto; padding: 16px; text-align: center; background: var(--bg); display: flex; align-items: center; justify-content: center; }
+  .receipt-viewer-body img    { max-width: 100%; max-height: 75vh; object-fit: contain; }
+  .receipt-viewer-body iframe { width: 100%; height: 75vh; border: 0; background: white; }
+  .receipt-viewer-body .receipt-viewer-loading { color: var(--muted); font-size: 13px; }
+  .receipt-viewer-footer  { padding: 10px 20px; border-top: 1px solid var(--border); text-align: right; font-size: 12px; }
   .emp-modal-content { background: white; border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25); width: 100%; max-width: 440px; max-height: 90vh; overflow-y: auto; }
   .emp-modal-header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
   .emp-modal-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 20px; font-weight: 500; color: var(--text); letter-spacing: -0.005em; }
@@ -1298,6 +1313,21 @@
     <div class="emp-modal-footer">
       <button type="button" class="btn" onclick="closeAddEmployeeModal()">Cancel</button>
       <button type="button" class="btn primary" id="emp-form-submit" onclick="submitEmployeeModal()">+ Add Employee</button>
+    </div>
+  </div>
+</div>
+
+<!-- [RV-1] Receipt viewer modal — opens images/PDFs in-app instead of a new tab.
+     Click backdrop or X to close; Esc key also closes via openReceiptViewer's keydown handler. -->
+<div id="receipt-viewer-modal" class="receipt-viewer-overlay" style="display:none;" onclick="if(event.target===this) closeReceiptViewer()">
+  <div class="receipt-viewer-content" onclick="event.stopPropagation()">
+    <div class="receipt-viewer-header">
+      <div class="receipt-viewer-title" id="receipt-viewer-title">Receipt</div>
+      <button type="button" class="receipt-viewer-close" onclick="closeReceiptViewer()" aria-label="Close">&times;</button>
+    </div>
+    <div class="receipt-viewer-body" id="receipt-viewer-body"></div>
+    <div class="receipt-viewer-footer">
+      <a id="receipt-viewer-download" href="#" target="_blank" rel="noopener" class="btn-link">Open in new tab</a>
     </div>
   </div>
 </div>
@@ -4545,6 +4575,57 @@ async function handleReceiptFileSelect(employeeId, idx, fileInput) {
   }
 }
 
+// [RV-1] In-app receipt viewer — opens the signed URL in a modal overlay
+// instead of a new browser tab. Supports images and PDFs based on file
+// extension; falls back to an "open in new tab" link for anything else
+// (and as a courtesy on file types the browser can't render inline, like
+// HEIC on Chrome). Esc key + X button + backdrop click all close.
+function openReceiptViewer(url, pathOrName) {
+  const modal = document.getElementById('receipt-viewer-modal');
+  if (!modal) return;
+  const body  = document.getElementById('receipt-viewer-body');
+  const title = document.getElementById('receipt-viewer-title');
+  const dl    = document.getElementById('receipt-viewer-download');
+  if (!body || !title || !dl) return;
+
+  // Filename from path for display.
+  const filename = (pathOrName || 'receipt').split('/').pop().split('?')[0] || 'Receipt';
+  title.textContent = filename;
+  dl.href = url;
+
+  // Detect file type by extension to pick the right inline renderer.
+  const lower = filename.toLowerCase();
+  const isPdf   = lower.endsWith('.pdf');
+  const isImage = /\.(jpe?g|png|webp|gif|bmp|svg)$/i.test(lower);
+
+  if (isPdf) {
+    body.innerHTML = `<iframe src="${esc(url)}" title="Receipt PDF"></iframe>`;
+  } else if (isImage) {
+    body.innerHTML = `<img src="${esc(url)}" alt="Receipt" />`;
+  } else {
+    // HEIC or unsupported: most browsers can't display inline. Show a
+    // friendly fallback that points to the new-tab link.
+    body.innerHTML = `<div class="receipt-viewer-loading">This file type can't be displayed in-app. Use "Open in new tab" below to view or download.</div>`;
+  }
+
+  modal.style.display = 'flex';
+  document.addEventListener('keydown', receiptViewerKeyHandler);
+}
+
+function closeReceiptViewer() {
+  const modal = document.getElementById('receipt-viewer-modal');
+  if (!modal) return;
+  modal.style.display = 'none';
+  const body = document.getElementById('receipt-viewer-body');
+  if (body) body.innerHTML = '';  // release the loaded image/iframe
+  document.removeEventListener('keydown', receiptViewerKeyHandler);
+}
+
+function receiptViewerKeyHandler(e) {
+  if (e.key === 'Escape') closeReceiptViewer();
+}
+
+
 async function viewReceiptFile(employeeId, idx) {
   const draft = getDraft();
   const entry = draft.entries[employeeId];
@@ -4562,7 +4643,7 @@ async function viewReceiptFile(employeeId, idx) {
       showToast('Could not open receipt — file may have been deleted.', 'error');
       return;
     }
-    window.open(url, '_blank', 'noopener');
+    openReceiptViewer(url, path);
   } catch (err) {
     console.error('[RC-2] could not get signed URL:', err);
     showToast('Could not open receipt — ' + (err.message || 'unknown error'), 'error');
@@ -6738,7 +6819,7 @@ async function viewReceiptFromCloud(path) {
       showToast('Could not open receipt — file may have been deleted.', 'error');
       return;
     }
-    window.open(url, '_blank', 'noopener');
+    openReceiptViewer(url, path);
   } catch (err) {
     console.error('[RC-3] could not get signed URL:', err);
     showToast('Could not open receipt — ' + (err.message || 'unknown error'), 'error');
