@@ -5143,6 +5143,15 @@ async function syncDraftToCloud(employeeId, signal) {
 // The RPC functions below do both steps inside a single Postgres transaction,
 // so it's all-or-nothing. RLS still applies (functions are SECURITY INVOKER),
 // so users can only replace data on timesheets they're authorized for.
+//
+// [SESS-5b] We call the RPC via rpcViaFetch() (plain fetch to /rest/v1/rpc/)
+// instead of supabaseClient.rpc(). The supabase-js PostgREST client gets into
+// a stuck state after enough idle time where .rpc() never makes the network
+// request and never resolves — only sign-out + sign-in unwedges it. We saw
+// this as `te.replace START` logs with no matching DONE, then the LF-1 60s
+// timeout firing ("cloud sync failed silently"). Plain fetch() avoids the
+// stuck client entirely. RLS / security / atomicity are unchanged — same
+// Postgres function, same auth token, just a different transport.
 async function syncTimeEntriesUpsert(timesheetId, localEntries, signal) {
   const rows = [];
   for (const te of localEntries) {
@@ -5164,17 +5173,14 @@ async function syncTimeEntriesUpsert(timesheetId, localEntries, signal) {
   }
 
   console.log(`[diag-AS]   te.replace (${rows.length} rows) START`);
-  let q = supabaseClient.rpc('replace_time_entries', {
+  await rpcViaFetch('replace_time_entries', {
     p_timesheet_id: timesheetId,
     p_entries:      rows,
-  });
-  if (signal) q = q.abortSignal(signal);
-  const { error } = await q;
-  if (error) throw error;
+  }, signal);
   console.log(`[diag-AS]   te.replace DONE`);
 }
 
-// ---- BUG-WI-1: Mileage sync — atomic replace via RPC ----------------------
+// ---- BUG-WI-1 / SESS-5b: Mileage sync — atomic replace via RPC (fetch) ----
 async function syncMileageWipeReplace(timesheetId, localEntries, signal) {
   const rows = [];
   for (const m of localEntries) {
@@ -5187,16 +5193,13 @@ async function syncMileageWipeReplace(timesheetId, localEntries, signal) {
       description: (m.description || '').trim() || null,
     });
   }
-  let q = supabaseClient.rpc('replace_mileage_entries', {
+  await rpcViaFetch('replace_mileage_entries', {
     p_timesheet_id: timesheetId,
     p_entries:      rows,
-  });
-  if (signal) q = q.abortSignal(signal);
-  const { error } = await q;
-  if (error) throw error;
+  }, signal);
 }
 
-// ---- BUG-WI-1: Reimbursements sync — atomic replace via RPC ---------------
+// ---- BUG-WI-1 / SESS-5b: Reimbursements sync — atomic replace via RPC (fetch)
 async function syncReimbursementsWipeReplace(timesheetId, localEntries, signal) {
   const rows = [];
   for (const r of localEntries) {
@@ -5211,13 +5214,10 @@ async function syncReimbursementsWipeReplace(timesheetId, localEntries, signal) 
       receipt_file_path: r.receipt_file_path || null,
     });
   }
-  let q = supabaseClient.rpc('replace_reimbursements', {
+  await rpcViaFetch('replace_reimbursements', {
     p_timesheet_id: timesheetId,
     p_entries:      rows,
-  });
-  if (signal) q = q.abortSignal(signal);
-  const { error } = await q;
-  if (error) throw error;
+  }, signal);
 }
 
 // Nuke an employee's draft rows in the cloud WITHOUT re-inserting anything.
@@ -9361,8 +9361,38 @@ const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // as the user has a valid session cached.
 async function getStorageAccessToken() {
   let token = null;
+
+  // [SESS-6] Race supabaseClient.auth.getSession() against a 500ms timer.
+  //
+  // WHY: this was the LAST hang point. SESS-5 bypassed the supabase-js
+  // storage client by using plain fetch(), and SESS-5b did the same for the
+  // PostgREST .rpc() client. But both bypasses still called into THIS
+  // helper, which called `supabaseClient.auth.getSession()`. The auth
+  // client suffers from the exact same wedge: its promise just never
+  // resolves once the client gets into its stuck state. `await` then
+  // hangs forever — and the original try/catch only catches THROWN
+  // errors, not promises-that-never-settle. So the localStorage fallback
+  // below never got a chance to run. Net effect: every code path that
+  // depended on this helper would hang until sign-out+sign-in.
+  //
+  // FIX: Promise.race against a 500ms timer. A healthy getSession()
+  // resolves in <10ms. If it hasn't resolved in 500ms, the auth client is
+  // wedged and we fall through to the localStorage scan (which always
+  // works because supabase-js persists the session there itself). The
+  // wedged getSession() promise keeps sitting in memory harmlessly; we
+  // just don't await it any longer.
+  //
+  // RESULT: any caller of this helper now gets a token within ~500ms
+  // worst case, instead of hanging forever. That includes:
+  //   - DAL.uploadReceiptFile / deleteReceiptFile / getSignedReceiptUrl
+  //   - rpcViaFetch (used by all three sync functions)
+  // So this single fix unwedges the receipt upload, the receipt view, and
+  // reinforces the SESS-5b finalize fix.
   try {
-    const sessionResult = await supabaseClient.auth.getSession();
+    const sessionResult = await Promise.race([
+      supabaseClient.auth.getSession(),
+      new Promise(resolve => setTimeout(() => resolve(null), 500)),
+    ]);
     token = sessionResult && sessionResult.data && sessionResult.data.session
       ? sessionResult.data.session.access_token
       : null;
@@ -9385,6 +9415,83 @@ async function getStorageAccessToken() {
     }
   }
   return token;
+}
+
+
+// [SESS-5b] Call a Postgres RPC function via plain fetch(), bypassing the
+// supabase-js client. Same motivation as SESS-5 (which bypassed the
+// supabase-js storage client): the supabase-js PostgREST client occasionally
+// gets into a stuck state where .rpc() never makes the network request and
+// never resolves — only sign-out + sign-in unwedges it. We saw this on the
+// time-entries / mileage / reimbursement sync RPCs (te.replace START with no
+// matching DONE, then the LF-1 60-second timeout).
+//
+// This helper avoids supabase-js entirely: it reads the access token from
+// localStorage (via getStorageAccessToken) and POSTs JSON directly to
+// /rest/v1/rpc/<funcName>. The Postgres function itself, RLS, and security
+// are identical — only the transport changes.
+//
+// Args:
+//   funcName — Postgres function name (e.g. 'replace_time_entries').
+//   params   — object passed as JSON body. Keys must match the function's
+//              parameter names exactly (e.g. p_timesheet_id, p_entries).
+//   signal   — optional AbortSignal from the caller (queueDraftSync passes
+//              one). If it aborts, fetch aborts.
+//
+// Behavior:
+//   * Internal 60s timeout via AbortController so this can never hang
+//     longer than that, even if the caller's signal never fires.
+//   * Throws Error with status + server message on non-2xx response.
+//   * Returns parsed JSON on success. Our replace_* RPCs return void, so
+//     the body is empty and this returns null — which is fine, callers
+//     don't read the return value.
+async function rpcViaFetch(funcName, params, signal) {
+  const token = await getStorageAccessToken();
+  if (!token) {
+    throw new Error('Not signed in (no access token available). Please sign out and back in.');
+  }
+
+  const url = `${SUPABASE_URL}/rest/v1/rpc/${funcName}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('rpc-timeout'), 60000);
+
+  // Propagate the caller's abort signal (if any) to our internal controller.
+  let externalAbortHandler = null;
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort('caller-aborted');
+    } else {
+      externalAbortHandler = () => controller.abort('caller-aborted');
+      signal.addEventListener('abort', externalAbortHandler);
+    }
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type':  'application/json',
+        'apikey':        SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify(params || {}),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+    if (signal && externalAbortHandler) {
+      signal.removeEventListener('abort', externalAbortHandler);
+    }
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`RPC ${funcName} failed (${response.status}): ${detail || response.statusText}`);
+  }
+
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
 }
 
 
