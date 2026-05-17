@@ -5089,15 +5089,18 @@ async function syncDraftToCloud(employeeId, signal) {
   let timesheetId = entry.timesheet_id;
   if (!timesheetId) {
     dt('timesheet lookup START');
-    let q = supabaseClient
-      .from('timesheets')
-      .select('id')
-      .eq('employee_id', employeeId)
-      .eq('pay_period_id', STATE.current_period.pay_period_id);
-    if (signal) q = q.abortSignal(signal);
-    const { data: existing, error: findErr } = await q.maybeSingle();
+    // [SESS-7] plain-fetch CRUD bypass. Same query as before, just via
+    // fetch() instead of supabase-js (which can wedge after idle time).
+    // The caller's abort signal is propagated through.
+    const existing = await dbSelectMaybeSingle('timesheets', {
+      select: 'id',
+      filters: {
+        employee_id:   `eq.${employeeId}`,
+        pay_period_id: `eq.${STATE.current_period.pay_period_id}`,
+      },
+      signal,
+    });
     dt('timesheet lookup DONE');
-    if (findErr) throw findErr;
     if (existing) {
       timesheetId = existing.id;
     } else {
@@ -9496,6 +9499,160 @@ async function rpcViaFetch(funcName, params, signal) {
 
 
 // ============================================================================
+// [SESS-7] Plain-fetch bypass for PostgREST CRUD (select/insert/update/delete)
+// ============================================================================
+// Same motivation as SESS-5b (RPC bypass) and SESS-5 (storage bypass): the
+// supabase-js PostgREST client gets into a stuck state where .select(),
+// .insert(), .update() never resolves after the tab has been idle. We saw
+// this on .rpc() and patched it with rpcViaFetch. Same wedge can hit
+// .insert/.update — which the finalize path depends on (createPaystub,
+// voidPaystub, rolloverPayPeriod, createTimesheet, plus the inline
+// timesheet lookup in syncDraftToCloud).
+//
+// This helper sends PostgREST requests via plain fetch(), reusing the auth
+// token from getStorageAccessToken (which SESS-6 already protected against
+// the auth-client wedge). RLS, security, and observable behavior are
+// unchanged — only the transport changes.
+//
+// Scope: ONLY the finalize-path DAL methods migrate to this helper for now.
+// Other DAL methods continue to use supabase-js until evidence shows they
+// need the same treatment (we don't fix what isn't broken).
+//
+// Args:
+//   method   — 'GET' | 'POST' | 'PATCH' | 'DELETE'
+//   table    — table name (e.g. 'paystubs')
+//   options  — { filters, select, body, returning, signal }
+//     filters    object of { columnName: 'eq.value' } pairs
+//                (value uses PostgREST filter syntax: eq.X, in.(X,Y), etc.)
+//     select     comma-separated columns to return (default '*')
+//     body       JSON body for POST/PATCH
+//     returning  true to ask PostgREST to return the row(s) on POST/PATCH
+//                via the `Prefer: return=representation` header
+//     signal     optional AbortSignal passed through to fetch
+//
+// Returns: parsed JSON response body (usually an array of rows), or null for
+// 204 No Content.
+async function crudViaFetch(method, table, options = {}) {
+  const {
+    filters = {},
+    select = '*',
+    body = null,
+    returning = false,
+    signal = null,
+  } = options;
+
+  const token = await getStorageAccessToken();
+  if (!token) {
+    throw new Error('Not signed in (no access token available). Please sign out and back in.');
+  }
+
+  // Build query string. URLSearchParams handles encoding correctly for our
+  // filter values (UUIDs, integers, booleans, ISO dates — no parens or commas
+  // in values for any finalize-path call site).
+  const params = new URLSearchParams();
+  for (const [col, expr] of Object.entries(filters)) {
+    params.append(col, expr);
+  }
+  const wantsReturn = returning || method === 'GET';
+  if (wantsReturn) {
+    params.set('select', select);
+  }
+  const qs = params.toString();
+  const url = `${SUPABASE_URL}/rest/v1/${table}${qs ? '?' + qs : ''}`;
+
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'apikey':        SUPABASE_ANON_KEY,
+    'Content-Type':  'application/json',
+  };
+  if (returning && (method === 'POST' || method === 'PATCH')) {
+    headers['Prefer'] = 'return=representation';
+  }
+
+  // 60s hard timeout (same as rpcViaFetch). If a caller signal is provided,
+  // its abort propagates to our internal controller.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('crud-timeout'), 60000);
+  let externalAbortHandler = null;
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort('caller-aborted');
+    } else {
+      externalAbortHandler = () => controller.abort('caller-aborted');
+      signal.addEventListener('abort', externalAbortHandler);
+    }
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+    if (signal && externalAbortHandler) {
+      signal.removeEventListener('abort', externalAbortHandler);
+    }
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`${method} ${table} failed (${response.status}): ${detail || response.statusText}`);
+  }
+
+  if (response.status === 204) return null;
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+// SELECT zero-or-one row. Mirrors supabase-js .maybeSingle().
+// Returns null on 0 rows, the row on 1 row, throws on >1 rows.
+async function dbSelectMaybeSingle(table, options) {
+  const rows = await crudViaFetch('GET', table, options);
+  if (!Array.isArray(rows)) return rows;
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
+    throw new Error(`Expected at most 1 row from ${table}, got ${rows.length}.`);
+  }
+  return rows[0];
+}
+
+// INSERT one row and return the inserted row. Mirrors supabase-js
+// .insert(row).select().single().
+async function dbInsertSingle(table, row, options = {}) {
+  const result = await crudViaFetch('POST', table, {
+    body: row,
+    select: options.select || '*',
+    returning: true,
+    signal: options.signal,
+  });
+  if (Array.isArray(result)) {
+    if (result.length === 0) {
+      throw new Error(`INSERT ${table} returned no rows.`);
+    }
+    return result[0];
+  }
+  return result;
+}
+
+// UPDATE rows matching filters. Returns array of updated rows (may be empty
+// if filters matched nothing or RLS blocked the update). Caller decides
+// whether empty result is an error.
+async function dbUpdate(table, patch, options) {
+  return crudViaFetch('PATCH', table, {
+    body: patch,
+    filters: options.filters,
+    select: options.select || '*',
+    returning: true,
+    signal: options.signal,
+  });
+}
+
+
+// ============================================================================
 // ---- PHASE 4 CHUNK 4d — DATA ACCESS LAYER (DAL) ----
 // ============================================================================
 // Wraps all Supabase table reads/writes behind a single `DAL` namespace so
@@ -10766,15 +10923,13 @@ const DAL = {
       throw new Error('voidPaystub: id (uuid string) is required.');
     }
 
-    // Confirm the paystub exists before writing, so we can throw a clear
-    // error instead of silently updating zero rows.
-    const { data: current, error: readErr } = await supabaseClient
-      .from('paystubs')
-      .select('id')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (readErr) throw readErr;
+    // [SESS-7] plain-fetch CRUD bypass (see crudViaFetch comment block above).
+    // Behavior unchanged: pre-check the row exists, then UPDATE the void
+    // columns, then return the updated row.
+    const current = await dbSelectMaybeSingle('paystubs', {
+      select: 'id',
+      filters: { id: `eq.${id}` },
+    });
     if (!current) {
       throw new Error(`voidPaystub: no paystub with id "${id}".`);
     }
@@ -10786,15 +10941,13 @@ const DAL = {
       voided_reason: opts.reason || null,
     };
 
-    const { data, error } = await supabaseClient
-      .from('paystubs')
-      .update(row)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    const updated = await dbUpdate('paystubs', row, {
+      filters: { id: `eq.${id}` },
+    });
+    if (!updated || updated.length === 0) {
+      throw new Error(`voidPaystub: update returned no rows (RLS may have blocked it).`);
+    }
+    return updated[0];
   },
 
   async restorePaystub(id) {
@@ -10880,18 +11033,18 @@ const DAL = {
       throw new Error('createPaystub: net_pay (number) is required.');
     }
 
+    // [SESS-7] plain-fetch CRUD bypass (see crudViaFetch comment block above).
     // Duplicate guard: block if an active paystub already exists for this
     // employee+period combination. Voided paystubs are ignored so that a
     // user can void a mistake and re-finalize.
-    const { data: existing, error: dupErr } = await supabaseClient
-      .from('paystubs')
-      .select('id')
-      .eq('employee_id', input.employee_id)
-      .eq('pay_period_id', input.pay_period_id)
-      .eq('voided', false)
-      .maybeSingle();
-
-    if (dupErr) throw dupErr;
+    const existing = await dbSelectMaybeSingle('paystubs', {
+      select: 'id',
+      filters: {
+        employee_id:   `eq.${input.employee_id}`,
+        pay_period_id: `eq.${input.pay_period_id}`,
+        voided:        'eq.false',
+      },
+    });
     if (existing) {
       throw new Error(
         `createPaystub: an active paystub already exists for this employee + pay period (id: ${existing.id}). Void it first if you need to replace it.`
@@ -10923,14 +11076,7 @@ const DAL = {
       futa:                  Number(input.futa                  || 0),
     };
 
-    const { data, error } = await supabaseClient
-      .from('paystubs')
-      .insert(row)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    return await dbInsertSingle('paystubs', row);
   },
 
   // ---- PHASE 2 CHUNK 4d-12 — TIMESHEET LIFECYCLE ----
@@ -10964,15 +11110,15 @@ const DAL = {
       throw new Error('createTimesheet: pay_period_id (uuid string) is required.');
     }
 
+    // [SESS-7] plain-fetch CRUD bypass (see crudViaFetch comment block above).
     // Duplicate guard: only one timesheet per (employee, period).
-    const { data: existing, error: dupErr } = await supabaseClient
-      .from('timesheets')
-      .select('id, submitted_at, finalized_at')
-      .eq('employee_id', input.employee_id)
-      .eq('pay_period_id', input.pay_period_id)
-      .maybeSingle();
-
-    if (dupErr) throw dupErr;
+    const existing = await dbSelectMaybeSingle('timesheets', {
+      select: 'id, submitted_at, finalized_at',
+      filters: {
+        employee_id:   `eq.${input.employee_id}`,
+        pay_period_id: `eq.${input.pay_period_id}`,
+      },
+    });
     if (existing) {
       throw new Error(
         `createTimesheet: a timesheet already exists for this employee + pay period (id: ${existing.id}).`
@@ -10982,19 +11128,10 @@ const DAL = {
     // Only employee_id and pay_period_id are caller-supplied. Everything
     // else — id, submitted_at, finalized_at, created_at, updated_at — is
     // filled in by DB defaults.
-    const row = {
+    return await dbInsertSingle('timesheets', {
       employee_id:   input.employee_id,
       pay_period_id: input.pay_period_id,
-    };
-
-    const { data, error } = await supabaseClient
-      .from('timesheets')
-      .insert(row)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    });
   },
 
   async submitTimesheet(id) {
@@ -11500,61 +11637,52 @@ const DAL = {
     const nextPp = Number(input.nextPp);
     const nextYear = Number(input.nextYear);
 
-    // ---- Step 1: close the current period ----
-    // Using .select().single() so we get a clean PGRST116 error if the
-    // currentId doesn't match any row (either wrong id or RLS blocked it).
-    const { error: closeErr } = await supabaseClient
-      .from('pay_periods')
-      .update({ status: 'closed' })
-      .eq('id', input.currentId)
-      .select('id')
-      .single();
+    // [SESS-7] plain-fetch CRUD bypass (see crudViaFetch comment block above).
+    // Three-step logic unchanged: close current, find next, open-or-create
+    // next. Each previously-supabase-js call is now a plain fetch().
 
-    if (closeErr) {
-      if (closeErr.code === 'PGRST116') {
-        throw new Error(`rolloverPayPeriod: no pay_periods row with id "${input.currentId}" (or RLS blocked the update).`);
-      }
-      throw closeErr;
+    // ---- Step 1: close the current period ----
+    // Replaces .update().select('id').single() — we now use dbUpdate (which
+    // returns an array) and check length. Same semantics: an empty result
+    // means the id didn't match any row (or RLS blocked it).
+    const closedRows = await dbUpdate('pay_periods', { status: 'closed' }, {
+      filters: { id: `eq.${input.currentId}` },
+      select: 'id',
+    });
+    if (!closedRows || closedRows.length === 0) {
+      throw new Error(`rolloverPayPeriod: no pay_periods row with id "${input.currentId}" (or RLS blocked the update).`);
     }
 
     // ---- Step 2: find the next period ----
-    const { data: existingNext, error: findErr } = await supabaseClient
-      .from('pay_periods')
-      .select('id, pp_number, year, start_date, end_date, pay_date, status')
-      .eq('pp_number', nextPp)
-      .eq('year', nextYear)
-      .maybeSingle();
-
-    if (findErr) throw findErr;
+    const existingNext = await dbSelectMaybeSingle('pay_periods', {
+      select: 'id, pp_number, year, start_date, end_date, pay_date, status',
+      filters: {
+        pp_number: `eq.${nextPp}`,
+        year:      `eq.${nextYear}`,
+      },
+    });
 
     if (existingNext) {
       // Flip the already-seeded row to status='open'.
-      const { data: openedRow, error: openErr } = await supabaseClient
-        .from('pay_periods')
-        .update({ status: 'open' })
-        .eq('id', existingNext.id)
-        .select('id, pp_number, year, start_date, end_date, pay_date, status')
-        .single();
-      if (openErr) throw openErr;
-      return openedRow;
+      const openedRows = await dbUpdate('pay_periods', { status: 'open' }, {
+        filters: { id: `eq.${existingNext.id}` },
+        select: 'id, pp_number, year, start_date, end_date, pay_date, status',
+      });
+      if (!openedRows || openedRows.length === 0) {
+        throw new Error('rolloverPayPeriod: failed to open the next pay_periods row (RLS may have blocked it).');
+      }
+      return openedRows[0];
     }
 
     // No existing row — INSERT a brand-new period with status='open'.
-    const { data: insertedRow, error: insertErr } = await supabaseClient
-      .from('pay_periods')
-      .insert({
-        pp_number:  nextPp,
-        year:       nextYear,
-        start_date: input.nextStart,
-        end_date:   input.nextEnd,
-        pay_date:   input.nextPayDate,
-        status:     'open',
-      })
-      .select('id, pp_number, year, start_date, end_date, pay_date, status')
-      .single();
-
-    if (insertErr) throw insertErr;
-    return insertedRow;
+    return await dbInsertSingle('pay_periods', {
+      pp_number:  nextPp,
+      year:       nextYear,
+      start_date: input.nextStart,
+      end_date:   input.nextEnd,
+      pay_date:   input.nextPayDate,
+      status:     'open',
+    }, { select: 'id, pp_number, year, start_date, end_date, pay_date, status' });
   },
 
 };
