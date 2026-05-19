@@ -629,6 +629,25 @@
   .cpw-emp-status.in-progress { background: var(--amber-soft); color: var(--amber); }
   .cpw-emp-status.finalized { background: var(--green-soft); color: var(--green); }
 
+  /* ---------- [DPW-1] Draft Progress Widget (Dashboard) ----------
+     Removable: delete this entire block, the renderDraftProgressWidget()
+     function, and the single `${renderDraftProgressWidget()}` call in
+     renderDashboard. Nothing else depends on these classes. */
+  .dpw { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; display: flex; flex-direction: column; gap: 14px; }
+  .dpw-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .dpw-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 18px; font-weight: 500; color: var(--text); letter-spacing: -0.005em; }
+  .dpw-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .dpw-emp-list { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .dpw-emp-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-radius: 8px; background: var(--bg); gap: 16px; flex-wrap: wrap; }
+  .dpw-emp-row.empty { opacity: 0.7; }
+  .dpw-emp-name { display: flex; align-items: center; gap: 10px; }
+  .dpw-emp-label { font-size: 14px; font-weight: 500; color: var(--text); }
+  .dpw-emp-counts { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .dpw-emp-stats { display: flex; gap: 18px; }
+  .dpw-stat { text-align: right; min-width: 60px; }
+  .dpw-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+  .dpw-stat-val { font-size: 14px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; margin-top: 2px; }
+
   /* ---------- Tax Filings page (Chunk 2) ---------- */
   .quarter-select-wrap { display: flex; flex-direction: column; gap: 4px; }
   .quarter-select-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
@@ -2513,6 +2532,124 @@ function renderCurrentPeriodWidget() {
   `;
 }
 
+// [DPW-1] Draft Progress Widget — admin-only dashboard card that shows what
+// each non-admin, active employee has entered into the current pay period
+// so far. Pulls counts and totals from STATE.draft_period (hydrated from
+// the cloud on sign-in and on tab focus per LF-4), so a hard refresh always
+// reflects the latest cloud data. Lets admin see "did Annie enter anything
+// for PP10 yet?" at a glance without running a SQL query.
+//
+// Returns "" (renders nothing) if:
+//   - The current user isn't admin (defense — renderDashboard already gates)
+//   - There's no current pay period yet
+//   - No active non-admin employees exist
+//
+// Entry-counting filters match the sync logic (syncTimeEntriesUpsert /
+// syncMileageWipeReplace / syncReimbursementsWipeReplace) so the counts
+// shown here match what actually gets saved to the cloud — partially-filled
+// rows (e.g. clock_in without clock_out) don't count.
+//
+// FULL REMOVAL: delete this function, the single `${renderDraftProgressWidget()}`
+// call in renderDashboard, and the .dpw* CSS block. Nothing else references it.
+function renderDraftProgressWidget() {
+  if (currentUserRole !== 'admin') return "";
+  const cp = STATE.current_period;
+  if (!cp) return "";
+
+  // Filter to non-admin, active employees. Admin's own draft (Chris) isn't
+  // useful here — he sees his own data while typing it in Run Payroll.
+  const others = STATE.employees.filter(emp =>
+    emp.active && emp.profile_id !== currentUserId
+  );
+  if (others.length === 0) return "";
+
+  const draftEntries = (STATE.draft_period && STATE.draft_period.entries) || {};
+
+  const rows = others.map(emp => {
+    const entry = draftEntries[emp.id];
+
+    // Same filters the sync uses — only count rows that would actually save.
+    const teRows = ((entry && entry.time_entries) || []).filter(te =>
+      te && te.date && te.clock_in && te.clock_out
+    );
+    const meRows = ((entry && entry.mileage_entries) || []).filter(m =>
+      m && Number(m.miles || 0) > 0
+    );
+    const reRows = ((entry && entry.reimbursements) || []).filter(r => {
+      if (!r) return false;
+      const d = (r.description || '').trim();
+      const a = Number(r.amount || 0);
+      return d && a > 0;
+    });
+
+    const totalRows = teRows.length + meRows.length + reRows.length;
+    if (totalRows === 0) {
+      return `
+        <div class="dpw-emp-row empty">
+          <div class="dpw-emp-name">
+            <div class="avatar">${esc(emp.avatar)}</div>
+            <div>
+              <div class="dpw-emp-label">${esc(emp.name)}</div>
+              <div class="dpw-emp-counts">Nothing entered yet</div>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    // Totals — reuse the same helpers the sync / preview use, so numbers
+    // match exactly what the preview paystub would show.
+    let totalHours = 0;
+    teRows.forEach(te => { totalHours += hoursFromClocks(te.clock_in, te.clock_out); });
+    let totalMiles = 0;
+    meRows.forEach(m => { totalMiles += Number(m.miles || 0); });
+    let totalReimb = 0;
+    reRows.forEach(r => { totalReimb += Number(r.amount || 0); });
+
+    const countsText = [
+      `${teRows.length} time`,
+      `${meRows.length} mileage`,
+      `${reRows.length} receipt${reRows.length === 1 ? '' : 's'}`,
+    ].join(' · ');
+
+    return `
+      <div class="dpw-emp-row">
+        <div class="dpw-emp-name">
+          <div class="avatar">${esc(emp.avatar)}</div>
+          <div>
+            <div class="dpw-emp-label">${esc(emp.name)}</div>
+            <div class="dpw-emp-counts">${countsText}</div>
+          </div>
+        </div>
+        <div class="dpw-emp-stats">
+          <div class="dpw-stat">
+            <div class="dpw-stat-label">Hours</div>
+            <div class="dpw-stat-val">${totalHours.toFixed(2)}</div>
+          </div>
+          <div class="dpw-stat">
+            <div class="dpw-stat-label">Miles</div>
+            <div class="dpw-stat-val">${totalMiles.toFixed(1)}</div>
+          </div>
+          <div class="dpw-stat">
+            <div class="dpw-stat-label">Reimb</div>
+            <div class="dpw-stat-val">${money(totalReimb)}</div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="dpw">
+      <div class="dpw-header">
+        <div>
+          <div class="dpw-title">Draft Progress — PP${cp.pp}</div>
+          <div class="dpw-sub">What other employees have entered so far for the current period.</div>
+        </div>
+      </div>
+      <div class="dpw-emp-list">${rows}</div>
+    </div>
+  `;
+}
+
 // [E-2] Find the employee record linked to the currently signed-in user.
 // Matches profiles.id (= auth.users.id = currentUserId) against the
 // employees.profile_id foreign key. Returns null if no match — which can
@@ -2595,6 +2732,7 @@ function renderDashboard() {
     </div>
 
     ${renderCurrentPeriodWidget()}
+    ${renderDraftProgressWidget()}
 
     <div class="stats-grid">
       <div class="stat-card">
