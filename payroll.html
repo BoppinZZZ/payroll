@@ -2563,7 +2563,16 @@ function renderDraftProgressWidget() {
   );
   if (others.length === 0) return "";
 
-  const draftEntries = (STATE.draft_period && STATE.draft_period.entries) || {};
+  // [DPW-1 audit] Defensive: only use STATE.draft_period if its pp matches
+  // the current period. getDraft() does this same check at line 4513 and
+  // resets a stale draft when there's a mismatch, but the widget can render
+  // BEFORE getDraft() is next called (e.g. dashboard right after a rollover,
+  // or after a backup restore). Without this guard, mismatched entries
+  // could appear under the new period's title. Falling back to {} just
+  // shows "Nothing entered yet" for everyone until getDraft() self-corrects
+  // on the next mutation.
+  const draftMatchesPeriod = STATE.draft_period && STATE.draft_period.pp === cp.pp;
+  const draftEntries = (draftMatchesPeriod && STATE.draft_period.entries) || {};
 
   const rows = others.map(emp => {
     const entry = draftEntries[emp.id];
