@@ -2584,11 +2584,17 @@ function renderDraftProgressWidget() {
     const meRows = ((entry && entry.mileage_entries) || []).filter(m =>
       m && Number(m.miles || 0) > 0
     );
+    // [REIMB-FIX] Matches the loosened syncReimbursementsWipeReplace filter:
+    // count any row the user has touched (description, amount, OR receipt).
+    // Otherwise admin would see "Nothing entered yet" while Annie has receipts
+    // uploaded but no description/amount typed yet — exactly the case that
+    // confused us before.
     const reRows = ((entry && entry.reimbursements) || []).filter(r => {
       if (!r) return false;
       const d = (r.description || '').trim();
       const a = Number(r.amount || 0);
-      return d && a > 0;
+      const hasReceipt = !!r.receipt_file_path;
+      return !!d || a > 0 || hasReceipt;
     });
 
     const totalRows = teRows.length + meRows.length + reRows.length;
@@ -2617,7 +2623,7 @@ function renderDraftProgressWidget() {
     const countsText = [
       `${teRows.length} time`,
       `${meRows.length} mileage`,
-      `${reRows.length} receipt${reRows.length === 1 ? '' : 's'}`,
+      `${reRows.length} reimbursement${reRows.length === 1 ? '' : 's'}`,
     ].join(' · ');
 
     return `
@@ -5350,18 +5356,27 @@ async function syncMileageWipeReplace(timesheetId, localEntries, signal) {
 }
 
 // ---- BUG-WI-1 / SESS-5b: Reimbursements sync — atomic replace via RPC (fetch)
+// [REIMB-FIX] Loosened filter (May 2026). Previously required BOTH description
+// AND amount > 0, which silently dropped rows that had only a receipt uploaded
+// (because the user hadn't typed description/amount yet). Result: receipt files
+// orphaned in Storage with no DB row pointing at them, and admin had no idea
+// Annie had even started — the row never appeared anywhere.
+// Now any row the user has touched (description, amount, OR receipt) persists
+// to the cloud. Finalize-time validation in finalizePP blocks rolling the
+// paystub forward until any partial rows are completed.
 async function syncReimbursementsWipeReplace(timesheetId, localEntries, signal) {
   const rows = [];
   for (const r of localEntries) {
     if (!r) continue;
     const description = (r.description || '').trim();
-    if (!description) continue;
-    const amount = Number(r.amount || 0);
-    if (!amount) continue;
+    const amount      = Number(r.amount || 0);
+    const receiptPath = r.receipt_file_path || null;
+    // Skip only truly-empty rows (user added the row then never touched it).
+    if (!description && !amount && !receiptPath) continue;
     rows.push({
-      description,
-      amount,
-      receipt_file_path: r.receipt_file_path || null,
+      description,                 // may be "" — saved as empty string
+      amount,                      // may be 0
+      receipt_file_path: receiptPath,
     });
   }
   await rpcViaFetch('replace_reimbursements', {
@@ -5444,11 +5459,20 @@ function renderRunPayrollStatusBanner() {
 }
 
 // ---------- "Has data?" — has this employee's draft received any input yet? ----------
+// [REIMB-FIX] Now also recognizes a row that has ONLY a receipt attached
+// (no description/amount typed yet) as "has data." Without this, Annie's
+// state would show "Not started" on the Current Period Widget even after
+// she'd uploaded a receipt, and the LF-4 localStorage filter could drop
+// her receipt-only rows on next hydrate.
 function draftEntryHasData(entry) {
   if (!entry) return false;
   if (entry.time_entries && entry.time_entries.some(te => (te.clock_in && te.clock_in.trim()) || (te.clock_out && te.clock_out.trim()))) return true;
   if (entry.mileage_entries && entry.mileage_entries.some(me => (me.miles && Number(me.miles) > 0))) return true;
-  if (entry.reimbursements && entry.reimbursements.some(re => (re.amount && Number(re.amount) > 0) || (re.description && re.description.trim()))) return true;
+  if (entry.reimbursements && entry.reimbursements.some(re =>
+       (re.amount && Number(re.amount) > 0)
+    || (re.description && re.description.trim())
+    || !!re.receipt_file_path
+  )) return true;
   return false;
 }
 
@@ -6144,6 +6168,31 @@ async function finalizePP(employeeId, btnEl) {
   if (missingMileagePurpose) {
     showToast(
       'Mileage rows with miles entered must have a Location & Purpose (e.g. "Acme Corp — client meeting"). Fill in the missing rows on Run Payroll, then try Finalize again.',
+      'error',
+      8000
+    );
+    return;
+  }
+
+  // [REIMB-FIX] Block finalize if any reimbursement row is incomplete.
+  // The sync filter (syncReimbursementsWipeReplace) was loosened to keep
+  // partial rows so receipt uploads don't get silently lost. That means
+  // it's now possible to reach the Finalize button with a row that has,
+  // say, a receipt attached but no description/amount yet. We don't want
+  // to roll those into the paystub at $0 — admin should complete or remove
+  // the row first. "Complete" means: description filled AND amount > 0.
+  const incompleteReimb = (entry.reimbursements || []).find(r => {
+    if (!r) return false;
+    const d = (r.description || '').trim();
+    const a = Number(r.amount || 0);
+    const hasReceipt = !!r.receipt_file_path;
+    const hasAnyContent = !!d || a > 0 || hasReceipt;
+    const isComplete   = !!d && a > 0;
+    return hasAnyContent && !isComplete;
+  });
+  if (incompleteReimb) {
+    showToast(
+      'One or more reimbursement rows are incomplete (missing description or amount). Open Run Payroll, fill in the missing fields — or remove the row entirely — then try Finalize again.',
       'error',
       8000
     );
