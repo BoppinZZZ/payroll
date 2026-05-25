@@ -5394,23 +5394,30 @@ async function clearEmployeeDraftCloud(employeeId) {
   if (window.location.protocol === 'file:') return;
   if (!STATE.current_period || !STATE.current_period.pay_period_id) return;
 
-  const { data: ts, error: findErr } = await supabaseClient
-    .from('timesheets')
-    .select('id')
-    .eq('employee_id', employeeId)
-    .eq('pay_period_id', STATE.current_period.pay_period_id)
-    .maybeSingle();
-  if (findErr) throw findErr;
+  // [SESS-7] plain-fetch CRUD bypass. Same logic as before:
+  //   1. Find the timesheet for this (employee, current period). If none,
+  //      nothing to clear.
+  //   2. Delete child rows in parallel — time_entries, mileage_entries,
+  //      reimbursements all referencing that timesheet_id.
+  // The timesheet row itself is intentionally left in place so a re-entry
+  // of data finds and reuses it.
+  const ts = await dbSelectMaybeSingle('timesheets', {
+    select: 'id',
+    filters: {
+      employee_id:   `eq.${employeeId}`,
+      pay_period_id: `eq.${STATE.current_period.pay_period_id}`,
+    },
+  });
   if (!ts) return;  // Nothing in the cloud to clear
 
-  const wipeResults = await Promise.all([
-    supabaseClient.from('time_entries').delete().eq('timesheet_id', ts.id),
-    supabaseClient.from('mileage_entries').delete().eq('timesheet_id', ts.id),
-    supabaseClient.from('reimbursements').delete().eq('timesheet_id', ts.id),
+  // Parallel deletes. Each dbDelete throws on HTTP error; Promise.all
+  // surfaces the first rejection. Empty result arrays are OK here —
+  // "no rows to delete" means the timesheet had no entries of that kind.
+  await Promise.all([
+    dbDelete('time_entries',     { filters: { timesheet_id: `eq.${ts.id}` }, select: 'id' }),
+    dbDelete('mileage_entries',  { filters: { timesheet_id: `eq.${ts.id}` }, select: 'id' }),
+    dbDelete('reimbursements',   { filters: { timesheet_id: `eq.${ts.id}` }, select: 'id' }),
   ]);
-  for (const r of wipeResults) {
-    if (r.error) throw r.error;
-  }
 }
 
 // Sum up a draft employee's entries for the live summary footer.
@@ -10089,7 +10096,7 @@ async function crudViaFetch(method, table, options = {}) {
     'apikey':        SUPABASE_ANON_KEY,
     'Content-Type':  'application/json',
   };
-  if (returning && (method === 'POST' || method === 'PATCH')) {
+  if (returning && (method === 'POST' || method === 'PATCH' || method === 'DELETE')) {
     headers['Prefer'] = 'return=representation';
   }
 
@@ -10168,6 +10175,18 @@ async function dbInsertSingle(table, row, options = {}) {
 async function dbUpdate(table, patch, options) {
   return crudViaFetch('PATCH', table, {
     body: patch,
+    filters: options.filters,
+    select: options.select || '*',
+    returning: true,
+    signal: options.signal,
+  });
+}
+
+// DELETE rows matching filters. Returns array of deleted rows (may be empty
+// if filters matched nothing or RLS blocked the delete). Caller decides
+// whether empty result is an error — same pattern as dbUpdate.
+async function dbDelete(table, options) {
+  return crudViaFetch('DELETE', table, {
     filters: options.filters,
     select: options.select || '*',
     returning: true,
@@ -11072,15 +11091,14 @@ const DAL = {
       throw new Error('saveCompany: no company row exists. Run seed migration (#04) first.');
     }
 
-    const { data, error } = await supabaseClient
-      .from('companies')
-      .update(row)
-      .eq('id', existing.id)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    // [SESS-7] plain-fetch CRUD bypass.
+    const updated = await dbUpdate('companies', row, {
+      filters: { id: `eq.${existing.id}` },
+    });
+    if (!updated || updated.length === 0) {
+      throw new Error('saveCompany: update returned no rows (RLS may have blocked it).');
+    }
+    return updated[0];
   },
 
 
@@ -11137,15 +11155,14 @@ const DAL = {
       throw new Error(`saveTaxRates: no tax_rates row for year ${year}. Run seed migration (#04) first.`);
     }
 
-    const { data, error } = await supabaseClient
-      .from('tax_rates')
-      .update(row)
-      .eq('year', year)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    // [SESS-7] plain-fetch CRUD bypass.
+    const updated = await dbUpdate('tax_rates', row, {
+      filters: { year: `eq.${year}` },
+    });
+    if (!updated || updated.length === 0) {
+      throw new Error(`saveTaxRates: update returned no rows for year ${year} (RLS may have blocked it).`);
+    }
+    return updated[0];
   },
 
 
@@ -11201,14 +11218,8 @@ const DAL = {
       zip:         input.zip     != null ? String(input.zip).trim()    || null : null,
     };
 
-    const { data, error } = await supabaseClient
-      .from('employees')
-      .insert(row)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    // [SESS-7] plain-fetch CRUD bypass.
+    return await dbInsertSingle('employees', row);
   },
 
 
@@ -11273,22 +11284,14 @@ const DAL = {
       throw new Error('updateEmployee: no fields to update.');
     }
 
-    const { data, error } = await supabaseClient
-      .from('employees')
-      .update(row)
-      .eq('id', id)
-      .select()
-      .single();
-
-    // PGRST116 = "query returned 0 rows" when .single() expects 1 —
-    // surface a cleaner error than the generic Supabase message.
-    if (error) {
-      if (error.code === 'PGRST116') {
-        throw new Error(`updateEmployee: no employees row with id "${id}".`);
-      }
-      throw error;
+    // [SESS-7] plain-fetch CRUD bypass.
+    const updated = await dbUpdate('employees', row, {
+      filters: { id: `eq.${id}` },
+    });
+    if (!updated || updated.length === 0) {
+      throw new Error(`updateEmployee: no employees row with id "${id}" (or RLS blocked the update).`);
     }
-    return data;
+    return updated[0];
   },
 
 
@@ -11316,18 +11319,14 @@ const DAL = {
       throw new Error('deleteEmployee: id (uuid string) is required.');
     }
 
-    // .select() returns the deleted rows. Supabase / Postgres do NOT raise
-    // an error when RLS blocks a DELETE — they silently affect 0 rows. So
-    // we check the returned array and throw explicitly if nothing was
-    // deleted. This turns a silent RLS failure into a loud one.
-    const { data, error } = await supabaseClient
-      .from('employees')
-      .delete()
-      .eq('id', id)
-      .select('id');
-
-    if (error) throw error;
-    if (!data || data.length === 0) {
+    // [SESS-7] plain-fetch CRUD bypass. dbDelete returns the deleted rows;
+    // empty array means either nothing matched the id or RLS blocked it.
+    // The error message preserves the original diagnostics.
+    const deleted = await dbDelete('employees', {
+      filters: { id: `eq.${id}` },
+      select: 'id',
+    });
+    if (!deleted || deleted.length === 0) {
       throw new Error(
         `deleteEmployee: no rows deleted for id "${id}". ` +
         `Most common causes: (1) RLS DELETE policy missing on employees, ` +
@@ -11396,14 +11395,13 @@ const DAL = {
       throw new Error('updatePaystub: no editable fields in input.');
     }
 
-    // Read current edit_count to increment it.
-    const { data: current, error: readErr } = await supabaseClient
-      .from('paystubs')
-      .select('edit_count')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (readErr) throw readErr;
+    // [SESS-7] plain-fetch CRUD bypass. Read current edit_count, bump it,
+    // then update — same two-trip pattern as before (still has the
+    // documented race-condition note above).
+    const current = await dbSelectMaybeSingle('paystubs', {
+      select: 'edit_count',
+      filters: { id: `eq.${id}` },
+    });
     if (!current) {
       throw new Error(`updatePaystub: no paystub with id "${id}".`);
     }
@@ -11413,15 +11411,13 @@ const DAL = {
     row.last_edited_at = new Date().toISOString();
     row.last_edited_by = opts.lastEditedBy || null;
 
-    const { data, error } = await supabaseClient
-      .from('paystubs')
-      .update(row)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    const updated = await dbUpdate('paystubs', row, {
+      filters: { id: `eq.${id}` },
+    });
+    if (!updated || updated.length === 0) {
+      throw new Error(`updatePaystub: update returned no rows (RLS may have blocked it).`);
+    }
+    return updated[0];
   },
 
   // ---- PHASE 2 CHUNK 4d-10 — VOID / RESTORE PAYSTUB ----
@@ -11479,14 +11475,11 @@ const DAL = {
       throw new Error('restorePaystub: id (uuid string) is required.');
     }
 
-    // Confirm the paystub exists before writing.
-    const { data: current, error: readErr } = await supabaseClient
-      .from('paystubs')
-      .select('id')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (readErr) throw readErr;
+    // [SESS-7] plain-fetch CRUD bypass.
+    const current = await dbSelectMaybeSingle('paystubs', {
+      select: 'id',
+      filters: { id: `eq.${id}` },
+    });
     if (!current) {
       throw new Error(`restorePaystub: no paystub with id "${id}".`);
     }
@@ -11498,15 +11491,13 @@ const DAL = {
       voided_reason: null,
     };
 
-    const { data, error } = await supabaseClient
-      .from('paystubs')
-      .update(row)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return data;
+    const updated = await dbUpdate('paystubs', row, {
+      filters: { id: `eq.${id}` },
+    });
+    if (!updated || updated.length === 0) {
+      throw new Error(`restorePaystub: update returned no rows (RLS may have blocked it).`);
+    }
+    return updated[0];
   },
 
   // ---- PHASE 2 CHUNK 4d-11 — CREATE PAYSTUB ----
