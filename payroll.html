@@ -5887,6 +5887,334 @@ function calcEmployerTaxes(grossPay, priorYtdGross) {
   };
 }
 
+
+// ============================================================================
+// [TAX-TESTS] In-browser tax engine regression tests
+// ----------------------------------------------------------------------------
+// HOW TO RUN: open DevTools (F12) → Console → type `runTaxTests()` → Enter.
+// All tests should print green. If any go red, the message tells you which
+// calculation differs and by how much.
+//
+// WHEN TO RUN:
+//   * Before changing anything in calcPaystubTaxes, calcEmployerTaxes,
+//     priorYtdGrossFor, or tax_rates → run and confirm all green.
+//   * After your change → run again. Any test flipping from green to red
+//     tells you exactly which case broke.
+//
+// HOW IT WORKS:
+//   * Stubs STATE.tax_rates with a fixed copy of the 2026 rates so tests
+//     are deterministic regardless of what's in Supabase right now (e.g.
+//     once you load 2027 rates, the tests still compare against 2026
+//     math, which is the snapshot of the tax engine's verified behavior).
+//   * Restores the real STATE.tax_rates in a finally{} so the app keeps
+//     working normally after the tests finish.
+//   * Each expected value below was hand-computed against the formulas in
+//     calcPaystubTaxes / calcEmployerTaxes — they are the snapshot, NOT
+//     just whatever the function happens to return today.
+//
+// FULL REMOVAL: delete everything between this header and the matching
+// "end [TAX-TESTS]" marker below. Nothing else in the app depends on it.
+// ============================================================================
+function runTaxTests() {
+  // Save live rates; restore at the end no matter what (try/finally below).
+  const originalRates = STATE.tax_rates;
+  STATE.tax_rates = {
+    ss_ee: 0.062,
+    ss_er: 0.062,
+    medicare_ee: 0.0145,
+    medicare_er: 0.0145,
+    addl_medicare: 0.009,
+    fed_flat: 0.10,
+    ca_flat: 0.044,
+    ca_sdi: 0.013,
+    suta: 0.034,
+    ett: 0.001,
+    futa: 0.006,
+    ss_wage_base: 184500,
+    addl_medicare_threshold_single: 200000,
+    state_unemployment_wage_base: 7000,
+  };
+
+  let passed = 0;
+  let failed = 0;
+  const failures = [];
+
+  // Tiny test harness. Wraps each test in try/catch so one failing test
+  // doesn't abort the whole run — we want to see every failure at once.
+  const it = (name, fn) => {
+    try {
+      fn();
+      passed++;
+      console.log('%c  ✓ ' + name, 'color: #22a25f;');
+    } catch (e) {
+      failed++;
+      failures.push({ name, msg: e.message });
+      console.log('%c  ✗ ' + name + ' — ' + e.message, 'color: #d04848;');
+    }
+  };
+
+  // $0.01 tolerance handles JS floating-point fuzz (e.g. 0.1 + 0.2 = 0.30000000000000004).
+  const assertNear = (actual, expected, label) => {
+    if (typeof actual !== 'number' || !isFinite(actual)) {
+      throw new Error(`${label}: expected number ~${expected}, got ${actual}`);
+    }
+    if (Math.abs(actual - expected) > 0.01) {
+      throw new Error(`${label}: expected ${expected.toFixed(2)}, got ${actual.toFixed(2)}`);
+    }
+  };
+
+  // Convenience wrappers — only assert the keys present in `expected`,
+  // so a test can focus on (say) just the SS field for a SS-cap test.
+  const expectPaystub = (gross, priorYtd, expected, label) => {
+    const t = calcPaystubTaxes(gross, priorYtd);
+    if (expected.federal  != null) assertNear(t.federal,  expected.federal,  `${label} federal`);
+    if (expected.ca_state != null) assertNear(t.ca_state, expected.ca_state, `${label} ca_state`);
+    if (expected.ss       != null) assertNear(t.ss,       expected.ss,       `${label} ss`);
+    if (expected.medicare != null) assertNear(t.medicare, expected.medicare, `${label} medicare`);
+    if (expected.ca_sdi   != null) assertNear(t.ca_sdi,   expected.ca_sdi,   `${label} ca_sdi`);
+  };
+  const expectEmployer = (gross, priorYtd, expected, label) => {
+    const t = calcEmployerTaxes(gross, priorYtd);
+    if (expected.ss_er       != null) assertNear(t.ss_er,       expected.ss_er,       `${label} ss_er`);
+    if (expected.medicare_er != null) assertNear(t.medicare_er, expected.medicare_er, `${label} medicare_er`);
+    if (expected.suta        != null) assertNear(t.suta,        expected.suta,        `${label} suta`);
+    if (expected.ett         != null) assertNear(t.ett,         expected.ett,         `${label} ett`);
+    if (expected.futa        != null) assertNear(t.futa,        expected.futa,        `${label} futa`);
+  };
+
+  console.log('%c─── Tax engine regression tests ───', 'font-weight: bold;');
+
+  try {
+    // ─── Happy path: simple paystubs, no priors ───────────────────────────
+
+    it('Happy path — $1000 gross, $0 priors', () => {
+      expectPaystub(1000, 0, {
+        federal: 100.00, ca_state: 44.00, ss: 62.00, medicare: 14.50, ca_sdi: 13.00,
+      }, '$1000');
+      expectEmployer(1000, 0, {
+        ss_er: 62.00, medicare_er: 14.50, suta: 34.00, ett: 1.00, futa: 6.00,
+      }, '$1000');
+    });
+
+    it('Happy path — $2500 gross, $0 priors', () => {
+      expectPaystub(2500, 0, {
+        federal: 250.00, ca_state: 110.00, ss: 155.00, medicare: 36.25, ca_sdi: 32.50,
+      }, '$2500');
+      expectEmployer(2500, 0, {
+        ss_er: 155.00, medicare_er: 36.25, suta: 85.00, ett: 2.50, futa: 15.00,
+      }, '$2500');
+    });
+
+    it('Happy path — $5000 gross, $0 priors (still under SUTA cap)', () => {
+      // $5000 priors after this paystub = $5000, still under $7000 SUTA cap.
+      expectPaystub(5000, 0, {
+        federal: 500.00, ca_state: 220.00, ss: 310.00, medicare: 72.50, ca_sdi: 65.00,
+      }, '$5000/0');
+      expectEmployer(5000, 0, {
+        ss_er: 310.00, medicare_er: 72.50, suta: 170.00, ett: 5.00, futa: 30.00,
+      }, '$5000/0');
+    });
+
+    it('Decimal precision — $1234.56 gross', () => {
+      // Tests that round2 (half-up to cents) matches Excel ROUND().
+      expectPaystub(1234.56, 0, {
+        federal: 123.46,  // 1234.56 * 0.10  = 123.456 → 123.46
+        ca_state: 54.32,  // 1234.56 * 0.044 = 54.3206 → 54.32
+        ss: 76.54,        // 1234.56 * 0.062 = 76.5427 → 76.54
+        medicare: 17.90,  // 1234.56 * 0.0145 = 17.9011 → 17.90
+        ca_sdi: 16.05,    // 1234.56 * 0.013 = 16.0493 → 16.05
+      }, '$1234.56');
+    });
+
+    // ─── SUTA / ETT / FUTA cap ($7000 state_unemployment_wage_base) ──────
+
+    it('SUTA mid-cap — $5000 gross, $5000 priors', () => {
+      // taxableForUnemp = min(5000, max(0, 7000 - 5000)) = 2000
+      expectEmployer(5000, 5000, {
+        suta: 68.00,   // 2000 * 0.034
+        ett: 2.00,     // 2000 * 0.001
+        futa: 12.00,   // 2000 * 0.006
+      }, 'SUTA mid');
+      // Employee-side taxes are unaffected by SUTA cap.
+      expectPaystub(5000, 5000, {
+        ss: 310.00, medicare: 72.50, ca_sdi: 65.00,
+      }, 'SUTA mid (ee)');
+    });
+
+    it('SUTA past cap — $5000 gross, $7500 priors', () => {
+      expectEmployer(5000, 7500, { suta: 0, ett: 0, futa: 0 }, 'SUTA past');
+      // Employee SS/Medicare/SDI still apply — only SUTA family is capped.
+      expectPaystub(5000, 7500, {
+        ss: 310.00, medicare: 72.50, ca_sdi: 65.00,
+      }, 'SUTA past (ee)');
+    });
+
+    it('SUTA at exact cap — $5000 gross, $7000 priors', () => {
+      // priors exactly equal to cap → 0 remaining
+      expectEmployer(5000, 7000, { suta: 0, ett: 0, futa: 0 }, 'SUTA exact');
+    });
+
+    it('SUTA boundary across two paystubs — $6500 then $6500', () => {
+      // First paystub: 6500 < 7000, full amount taxable.
+      expectEmployer(6500, 0, {
+        suta: 221.00,  // 6500 * 0.034
+        ett: 6.50,
+        futa: 39.00,
+      }, 'First half');
+      // Second paystub: priors $6500 leaves $500 remaining of cap.
+      expectEmployer(6500, 6500, {
+        suta: 17.00,   // 500 * 0.034
+        ett: 0.50,
+        futa: 3.00,
+      }, 'Second half');
+    });
+
+    // ─── SS wage cap ($184,500 ss_wage_base) ──────────────────────────────
+
+    it('SS mid-cap — $5000 gross, $180,000 priors', () => {
+      // priorSS = 180000, remainSS = 4500, taxableSS = min(5000, 4500) = 4500
+      expectPaystub(5000, 180000, { ss: 279.00 }, 'SS mid');     // 4500 * 0.062
+      expectEmployer(5000, 180000, { ss_er: 279.00 }, 'SS mid (er)');
+    });
+
+    it('SS past cap — $5000 gross, $190,000 priors', () => {
+      expectPaystub(5000, 190000, { ss: 0 }, 'SS past');
+      expectEmployer(5000, 190000, { ss_er: 0 }, 'SS past (er)');
+    });
+
+    it('SS at exact cap — $5000 gross, $184,500 priors', () => {
+      expectPaystub(5000, 184500, { ss: 0 }, 'SS exact');
+      expectEmployer(5000, 184500, { ss_er: 0 }, 'SS exact (er)');
+    });
+
+    it('SS single mega-paystub — $184,500 gross, $0 priors', () => {
+      // Entire $184,500 taxable for SS in one period (theoretical only —
+      // a bi-weekly employee couldn't earn $184K in one period, but tests
+      // the math at the boundary).
+      expectPaystub(184500, 0, { ss: 11439.00 }, 'SS full');
+      expectEmployer(184500, 0, {
+        ss_er: 11439.00,
+        suta: 238.00,   // 7000 * 0.034 (SUTA still capped at $7K)
+        ett: 7.00,
+        futa: 42.00,
+      }, 'SS full (er)');
+    });
+
+    // ─── Medicare has no cap — full rate regardless of YTD ───────────────
+
+    it('Medicare uncapped — $5000 gross at $250,000 YTD', () => {
+      // Even past the Add'l Medicare threshold ($200K single), the engine
+      // applies the flat 1.45% only. Snapshot of current behavior.
+      expectPaystub(5000, 250000, { medicare: 72.50 }, 'Medicare uncapped');
+      expectEmployer(5000, 250000, { medicare_er: 72.50 }, 'Medicare uncapped (er)');
+    });
+
+    // ─── Edge cases ───────────────────────────────────────────────────────
+
+    it('Zero gross — all taxes zero', () => {
+      expectPaystub(0, 0, {
+        federal: 0, ca_state: 0, ss: 0, medicare: 0, ca_sdi: 0,
+      }, 'Zero');
+      expectEmployer(0, 0, {
+        ss_er: 0, medicare_er: 0, suta: 0, ett: 0, futa: 0,
+      }, 'Zero (er)');
+    });
+
+    it('Zero gross with priors — SS cap unused but no gross to tax', () => {
+      expectPaystub(0, 180000, { ss: 0 }, 'Zero with priors');
+    });
+
+    it('Very small gross — $0.50', () => {
+      expectPaystub(0.50, 0, {
+        federal: 0.05,    // 0.05
+        ca_state: 0.02,   // 0.022 → 0.02
+        ss: 0.03,         // 0.031 → 0.03
+        medicare: 0.01,   // 0.00725 → 0.01
+        ca_sdi: 0.01,     // 0.0065 → 0.01
+      }, '$0.50');
+    });
+
+    it('Realistic high-earner paystub — $7500 gross, $90,000 priors', () => {
+      expectPaystub(7500, 90000, {
+        federal: 750.00,   ca_state: 330.00, ss: 465.00,
+        medicare: 108.75,  ca_sdi: 97.50,
+      }, 'High earner');
+      expectEmployer(7500, 90000, {
+        ss_er: 465.00, medicare_er: 108.75,
+        suta: 0, ett: 0, futa: 0,  // far past $7K SUTA cap
+      }, 'High earner (er)');
+    });
+
+    // ─── EE/ER parity (same rate, same cap) ──────────────────────────────
+
+    it('SS employee/employer parity — uncapped', () => {
+      const ee = calcPaystubTaxes(3000, 0);
+      const er = calcEmployerTaxes(3000, 0);
+      assertNear(ee.ss, er.ss_er, 'SS parity');
+    });
+
+    it('SS employee/employer parity — partial cap', () => {
+      const ee = calcPaystubTaxes(5000, 180000);
+      const er = calcEmployerTaxes(5000, 180000);
+      assertNear(ee.ss, er.ss_er, 'SS parity (capped)');
+    });
+
+    it('Medicare employee/employer parity', () => {
+      const ee = calcPaystubTaxes(3000, 0);
+      const er = calcEmployerTaxes(3000, 0);
+      assertNear(ee.medicare, er.medicare_er, 'Medicare parity');
+    });
+
+    // ─── priorYtdGrossFor helper ─────────────────────────────────────────
+
+    it('priorYtdGrossFor with no periods returns 0', () => {
+      const fakeEmp = { periods: [] };
+      assertNear(priorYtdGrossFor(fakeEmp, 5), 0, 'No periods');
+    });
+
+    it('priorYtdGrossFor sums only periods before requested pp', () => {
+      const fakeEmp = {
+        periods: [
+          { pp: 1, gross_pay: 1000 },
+          { pp: 2, gross_pay: 2000 },
+          { pp: 3, gross_pay: 1500 },
+          { pp: 4, gross_pay: 5000 },  // excluded (pp >= requested)
+        ],
+      };
+      assertNear(priorYtdGrossFor(fakeEmp, 4), 4500, 'Sum to pp 4');
+    });
+
+    it('priorYtdGrossFor excludes voided paystubs', () => {
+      const fakeEmp = {
+        periods: [
+          { pp: 1, gross_pay: 1000, voided: false },
+          { pp: 2, gross_pay: 2000, voided: true },   // excluded
+          { pp: 3, gross_pay: 1500, voided: false },
+        ],
+      };
+      assertNear(priorYtdGrossFor(fakeEmp, 4), 2500, 'Excludes voided');
+    });
+
+  } finally {
+    // Always restore real rates, even if a test throws unexpectedly.
+    STATE.tax_rates = originalRates;
+  }
+
+  const summary = `Results: ${passed} passed, ${failed} failed`;
+  console.log(`%c\n${summary}`,
+    failed === 0
+      ? 'color: #22a25f; font-weight: bold;'
+      : 'color: #d04848; font-weight: bold;');
+  if (failed > 0) {
+    console.log('Failures:', failures);
+  }
+  return { passed, failed, failures };
+}
+// ============================================================================
+// end [TAX-TESTS]
+// ============================================================================
+
+
 // Build a complete period object from a draft entry — same shape as historical
 // periods, plus an extra employer_taxes block (ignored by Step 1 views).
 function buildPeriodFromDraft(emp, entry) {
