@@ -5848,10 +5848,49 @@ function round2(x) { return Math.round(x * 100) / 100; }
 // Compute YTD gross pay for an employee up to but NOT including a given PP.
 // Used as "prior YTD" when calculating caps (SS, SUTA, ETT, FUTA).
 // Voided paystubs are excluded so cap math reflects what was actually paid.
+//
+// [YE-1 year-boundary fix] Sums only paystubs in the SAME calendar year as
+// the requested pp. Without this filter, PP27 (which ends in 2027 but
+// follows a long string of 2026 paystubs in emp.periods) would inherit
+// 2026 YTD totals — so the $7K SUTA / $7K FUTA / $184,500 SS caps would
+// look permanently exhausted in early 2027 and we'd silently UNDERPAY
+// state unemployment tax. The caps reset every Jan 1; this filter makes
+// the YTD basis reflect that.
+//
+// Year derivation (two lookups, tried in order):
+//   1. emp.periods.find(p => p.pp === pp).end_date — the case for any
+//      historical edit / downstream recompute (the pp exists in emp.periods).
+//   2. STATE.current_period.end — the case for the in-progress draft
+//      paystub that hasn't been finalized into emp.periods yet.
+// If neither lookup yields a year (an unexpected probe with a pp number
+// that doesn't exist anywhere), we fall back to the old unfiltered sum
+// and log a warn — preserves the historical behavior in surprise cases
+// rather than silently returning $0 and shipping a wrong paystub.
 function priorYtdGrossFor(emp, pp) {
+  let year = null;
+  if (emp && emp.periods) {
+    for (const p of emp.periods) {
+      if (p.pp === pp) {
+        year = yearOfDate(p.end_date);
+        break;
+      }
+    }
+  }
+  if (year == null
+      && typeof STATE !== 'undefined' && STATE.current_period
+      && STATE.current_period.pp === pp) {
+    year = yearOfDate(STATE.current_period.end);
+  }
+  if (year == null) {
+    console.warn(`[YE-1] priorYtdGrossFor: could not determine calendar year for pp=${pp}; falling back to unfiltered all-years sum.`);
+  }
+
   let sum = 0;
-  emp.periods.forEach(p => {
-    if (p.pp < pp && isPaystubActive(p)) sum += p.gross_pay || 0;
+  (emp && emp.periods || []).forEach(p => {
+    if (p.pp >= pp) return;
+    if (!isPaystubActive(p)) return;
+    if (year != null && yearOfDate(p.end_date) !== year) return;
+    sum += p.gross_pay || 0;
   });
   return sum;
 }
@@ -6173,6 +6212,9 @@ function runTaxTests() {
     });
 
     // ─── priorYtdGrossFor helper ─────────────────────────────────────────
+    // [YE-1] All fake employees below include `end_date` on every period
+    // so the year-derivation lookup inside priorYtdGrossFor succeeds and
+    // we exercise the year-filter logic (not the fallback warn path).
 
     it('priorYtdGrossFor with no periods returns 0', () => {
       const fakeEmp = { periods: [] };
@@ -6182,24 +6224,62 @@ function runTaxTests() {
     it('priorYtdGrossFor sums only periods before requested pp', () => {
       const fakeEmp = {
         periods: [
-          { pp: 1, gross_pay: 1000 },
-          { pp: 2, gross_pay: 2000 },
-          { pp: 3, gross_pay: 1500 },
-          { pp: 4, gross_pay: 5000 },  // excluded (pp >= requested)
+          { pp: 1, gross_pay: 1000, end_date: '2026-01-15' },
+          { pp: 2, gross_pay: 2000, end_date: '2026-01-29' },
+          { pp: 3, gross_pay: 1500, end_date: '2026-02-12' },
+          { pp: 4, gross_pay: 5000, end_date: '2026-02-26' },  // excluded (pp >= requested)
         ],
       };
       assertNear(priorYtdGrossFor(fakeEmp, 4), 4500, 'Sum to pp 4');
     });
 
     it('priorYtdGrossFor excludes voided paystubs', () => {
+      // pp 4 is included as the "anchor" so the function can derive 2026
+      // as the target year; without an anchor it would fall back to a
+      // warn-and-unfiltered path (correct math but noisy console).
       const fakeEmp = {
         periods: [
-          { pp: 1, gross_pay: 1000, voided: false },
-          { pp: 2, gross_pay: 2000, voided: true },   // excluded
-          { pp: 3, gross_pay: 1500, voided: false },
+          { pp: 1, gross_pay: 1000, voided: false, end_date: '2026-01-15' },
+          { pp: 2, gross_pay: 2000, voided: true,  end_date: '2026-01-29' },  // excluded
+          { pp: 3, gross_pay: 1500, voided: false, end_date: '2026-02-12' },
+          { pp: 4, gross_pay: 0,    voided: false, end_date: '2026-02-26' },  // anchor for year derivation
         ],
       };
       assertNear(priorYtdGrossFor(fakeEmp, 4), 2500, 'Excludes voided');
+    });
+
+    // [YE-1] Year-boundary regression tests — these are the bugs we shipped
+    // this fix for. Before the fix, both of these assertions would fail
+    // because the old function summed across all years.
+    it('[YE-1] caps reset at year boundary — PP in 2027 sees only 2027 priors', () => {
+      const fakeEmp = {
+        periods: [
+          // A full year of 2026 paystubs — these should NOT be in PP28's prior YTD
+          { pp: 25, gross_pay: 3000, end_date: '2026-11-27' },
+          { pp: 26, gross_pay: 3000, end_date: '2026-12-11' },
+          { pp: 27, gross_pay: 3000, end_date: '2026-12-25' },
+          // First 2027 paystub
+          { pp: 28, gross_pay: 3000, end_date: '2027-01-08' },
+          // The paystub we're computing for — its end_date is 2027, so it's a 2027 period
+          { pp: 29, gross_pay: 3000, end_date: '2027-01-22' },
+        ],
+      };
+      // PP29 is in 2027. Prior YTD should include ONLY PP28 (2027) = $3000.
+      // Old buggy behavior: would return $12000 (PP25+26+27+28).
+      assertNear(priorYtdGrossFor(fakeEmp, 29), 3000, 'PP29 prior YTD = 2027 only');
+    });
+
+    it('[YE-1] year-spanning emp — PP in 2026 still gets full 2026 YTD', () => {
+      const fakeEmp = {
+        periods: [
+          { pp: 1,  gross_pay: 1000, end_date: '2026-01-15' },
+          { pp: 2,  gross_pay: 1000, end_date: '2026-01-29' },
+          { pp: 27, gross_pay: 1000, end_date: '2027-01-08' },  // 2027 — excluded
+          { pp: 28, gross_pay: 1000, end_date: '2027-01-22' },  // 2027 — excluded
+        ],
+      };
+      // PP2 is in 2026. Prior YTD should be PP1 only = $1000.
+      assertNear(priorYtdGrossFor(fakeEmp, 2), 1000, 'PP2 prior YTD = 2026 priors only');
     });
 
   } finally {
