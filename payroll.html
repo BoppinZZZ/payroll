@@ -13018,6 +13018,56 @@ async function initAuth() {
 }
 
 initAuth();
+
+
+// ============================================================================
+// [SW-1] Service worker registration — auto cache-busting on GitHub Pages
+// ----------------------------------------------------------------------------
+// Replaces the manual `?v=N` URL-bump cache-bust trick. The SW (sw.js,
+// served from the same directory as payroll.html) uses a network-first
+// strategy for navigation requests, so every visit gets the freshest
+// payroll.html if the network is available. Offline visits get the
+// cached copy.
+//
+// Skipped when running from file:// (local dev), and skipped if the
+// browser doesn't support service workers (very old Safari, IE). In
+// either case the app behaves identically to the pre-SW version.
+//
+// Registration failure is logged and swallowed — a broken SW must never
+// block the app from loading.
+//
+// To remove later:
+//   1. Delete sw.js from the deploy directory.
+//   2. Delete this block.
+//   3. (Optional) deploy a one-line sw.js that calls
+//      `self.registration.unregister()` so existing users' browsers
+//      drop the registration on next visit.
+// ============================================================================
+if ('serviceWorker' in navigator && window.location.protocol !== 'file:') {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js')
+      .then(reg => {
+        // Periodic update check while the tab stays open. Without this,
+        // a user who keeps the tab open for days won't notice new
+        // versions until they manually refresh. 30 minutes balances
+        // "fairly fresh" against "not hammering GitHub Pages".
+        setInterval(() => {
+          reg.update().catch(() => {
+            // Update check failure is non-fatal — next page load will
+            // try again automatically.
+          });
+        }, 30 * 60 * 1000);
+        console.log('[SW-1] Service worker registered (scope:', reg.scope, ')');
+      })
+      .catch(err => {
+        // SW registration can fail for many reasons (private browsing on
+        // some browsers, MIME type issues if GitHub Pages serves sw.js
+        // incorrectly, etc.). The app still works without it; we just
+        // miss the auto cache-busting benefit.
+        console.warn('[SW-1] Service worker registration failed:', err);
+      });
+  });
+}
 </script>
 </body>
 </html>
