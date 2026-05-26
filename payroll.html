@@ -1732,7 +1732,14 @@ let runPayrollSelectedEmp = null;  // employee id currently being edited in Run 
 let taxFilingsSelection = null;    // { year, quarter } selected on Tax Filings page; null = default to current quarter
 let yearEndSelection = null;       // [WG-3] { year } selected on Year-End page; null = default to most recent year with data
 let payPeriodSummarySelection = null;  // [PS-1] { pp } selected on Total Paystub page; null = default to most recent finalized PP
-let activityLogFilter = { employeeId: 'all', eventType: 'all' };  // [AL-3] Activity Log filters
+// [AL-3] Activity Log filter state. [AL-FILTER] expands with date-range
+// and actor (who DID it, vs. employeeId = whose paystub is affected).
+let activityLogFilter = {
+  employeeId: 'all',
+  eventType:  'all',
+  dateRange:  'all',  // 'all' | 'last7' | 'last30' | 'last90'
+  actorId:    'all',  // 'all' | <uuid> | 'system' (events with no actorId)
+};
 
 // ============================================================================
 // 3. UTILITY FUNCTIONS
@@ -7501,10 +7508,32 @@ function renderActivityLog() {
 
   const allEvents = buildActivityLog();
 
+  // [AL-FILTER] Pre-compute the date threshold for the dateRange filter.
+  // 'all' → null (no threshold); 'last7' → 7 days ago, etc. Threshold is
+  // an ISO string so we can compare lexically against event.timestamp.
+  const dateRangeDays = {
+    last7: 7, last30: 30, last90: 90,
+  }[activityLogFilter.dateRange] || null;
+  const dateThreshold = dateRangeDays
+    ? new Date(Date.now() - dateRangeDays * 86400000).toISOString()
+    : null;
+
   // Apply filters
   const filtered = allEvents.filter(e => {
     if (activityLogFilter.employeeId !== 'all' && e.employeeId !== activityLogFilter.employeeId) return false;
     if (activityLogFilter.eventType  !== 'all' && e.eventType  !== activityLogFilter.eventType)  return false;
+    // [AL-FILTER] Date range
+    if (dateThreshold && (!e.timestamp || e.timestamp < dateThreshold)) return false;
+    // [AL-FILTER] Actor — 'system' matches events with no actorId, anything
+    // else matches by exact actorId. Useful for "what did Annie do" /
+    // "what was auto-generated" queries.
+    if (activityLogFilter.actorId !== 'all') {
+      if (activityLogFilter.actorId === 'system') {
+        if (e.actorId) return false;
+      } else if (e.actorId !== activityLogFilter.actorId) {
+        return false;
+      }
+    }
     return true;
   });
 
@@ -7521,6 +7550,38 @@ function renderActivityLog() {
   ].map(([v, label]) =>
     `<option value="${v}" ${activityLogFilter.eventType === v ? 'selected' : ''}>${label}</option>`
   ).join('');
+
+  // [AL-FILTER] Date-range dropdown options.
+  const dateRangeOptions = [
+    ['all',    'All time'],
+    ['last7',  'Last 7 days'],
+    ['last30', 'Last 30 days'],
+    ['last90', 'Last 90 days'],
+  ].map(([v, label]) =>
+    `<option value="${v}" ${activityLogFilter.dateRange === v ? 'selected' : ''}>${label}</option>`
+  ).join('');
+
+  // [AL-FILTER] Actor dropdown options — collected from the unique actorIds
+  // that actually appear in the event list (so we don't list users who've
+  // never performed an action). 'system' appended when any event has no
+  // actor (legacy paystubs from before the audit-trail trigger landed).
+  const actorIdsInEvents = new Set();
+  let hasSystemEvents = false;
+  for (const e of allEvents) {
+    if (e.actorId) actorIdsInEvents.add(e.actorId);
+    else hasSystemEvents = true;
+  }
+  const actorOptionRows = ['<option value="all">All actors</option>'];
+  for (const id of actorIdsInEvents) {
+    const name = resolveActorName(id);
+    const sel  = activityLogFilter.actorId === id ? 'selected' : '';
+    actorOptionRows.push(`<option value="${id}" ${sel}>${esc(name)}</option>`);
+  }
+  if (hasSystemEvents) {
+    const sel = activityLogFilter.actorId === 'system' ? 'selected' : '';
+    actorOptionRows.push(`<option value="system" ${sel}>(system)</option>`);
+  }
+  const actorOptions = actorOptionRows.join('');
 
   // Per-event row rendering
   const eventBadge = type => {
@@ -7555,11 +7616,17 @@ function renderActivityLog() {
         <div class="page-title">Activity Log</div>
         <div class="page-sub">Audit trail of paystub finalizes, edits, and voids · ${allEvents.length} total events</div>
       </div>
-      <div style="display:flex; gap:10px; align-items:center;">
-        <select class="quarter-select" onchange="setActivityFilter('employeeId', this.value)">
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <select class="quarter-select" style="min-width:160px;" onchange="setActivityFilter('dateRange', this.value)" title="Filter events by recency">
+          ${dateRangeOptions}
+        </select>
+        <select class="quarter-select" onchange="setActivityFilter('employeeId', this.value)" title="Filter by whose paystub was affected">
           ${empOptions}
         </select>
-        <select class="quarter-select" style="min-width:160px;" onchange="setActivityFilter('eventType', this.value)">
+        <select class="quarter-select" style="min-width:160px;" onchange="setActivityFilter('actorId', this.value)" title="Filter by who performed the action">
+          ${actorOptions}
+        </select>
+        <select class="quarter-select" style="min-width:160px;" onchange="setActivityFilter('eventType', this.value)" title="Filter by action type">
           ${typeOptions}
         </select>
       </div>
