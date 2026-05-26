@@ -10801,6 +10801,28 @@ const DAL = {
       this.getProfiles(),
     ]);
 
+    // [YE-2 missing-tax-rates safety net] Throw a named error if the
+    // tax_rates row for the requested year doesn't exist. Without this
+    // check, the rest of the hydrate succeeds but STATE.tax_rates ends
+    // up null, then the next call to calcPaystubTaxes throws an obscure
+    // "cannot read property 'fed_flat' of null" deep inside Finalize —
+    // by which point the user has no idea what to do. The named error
+    // gives hydrateAndRender something specific to surface in a toast.
+    //
+    // Expected operational fix: admin inserts the next year's tax_rates
+    // row in Supabase before Jan 1 (e.g. copy the prior year and update
+    // ss_wage_base + any IRS rate changes), then hard-refreshes the app.
+    if (!taxRates) {
+      const err = new Error(
+        `No tax_rates row exists for year ${year}. ` +
+        `Add a tax_rates row for ${year} in Supabase (easiest: copy the ${year - 1} ` +
+        `row and update ss_wage_base + any IRS rate changes), then hard-refresh.`
+      );
+      err.code = 'MISSING_TAX_RATES';
+      err.year = year;
+      throw err;
+    }
+
     // [4g-1] Also fetch in-progress draft data for the currently-open period.
     // We need payPeriods to resolve first to know which period is open, so
     // this runs as a second phase rather than inside the Promise.all. If no
@@ -12397,6 +12419,14 @@ async function hydrateAndRender() {
     }
   } catch (err) {
     console.warn('[hydrate] Failed to hydrate from Supabase:', err);
+    // [YE-2] If the hydrate failed because the year's tax_rates row is
+    // missing, show a long-duration toast with the exact remediation
+    // step. For any other hydrate error, the existing console.warn is
+    // enough — those are typically transient (network blip during sign-in)
+    // and don't need a permanent UI alarm.
+    if (err && err.code === 'MISSING_TAX_RATES') {
+      showToast(err.message, 'error', 30000);  // 30s so admin actually sees it
+    }
   } finally {
     // [Polish] Always hide the loading overlay when hydrate finishes — success
     // OR failure. On failure the user lands on whatever STATE had before (likely
