@@ -4714,6 +4714,7 @@ async function handleReceiptFileSelect(employeeId, idx, fileInput) {
     showToast('Receipt uploaded — ' + file.name, 'success');
   } catch (err) {
     console.error('[RC-2] receipt upload failed:', err);
+    logError('receipt-upload', err, { employee_id: employeeId, idx, filename: file && file.name });
     showToast('Upload failed — ' + (err.message || 'unknown error'), 'error');
   } finally {
     receiptUploadInProgress.delete(key);
@@ -4793,6 +4794,7 @@ async function viewReceiptFile(employeeId, idx) {
     openReceiptViewer(url, path);
   } catch (err) {
     console.error('[RC-2] could not get signed URL:', err);
+    logError('receipt-view', err, { employee_id: employeeId, idx, path });
     showToast('Could not open receipt — ' + (err.message || 'unknown error'), 'error');
   }
 }
@@ -4975,6 +4977,11 @@ async function runDraftSyncLoop(employeeId, s) {
         // attempt; on refresh, hydrateAndRender restores the local draft.
         const errMsg = (err && err.message) || String(err);
         console.warn('[LF-1] cloud sync failed silently (data is in localStorage):', errMsg);
+        // [ERR-LOG] This is the exact symptom Annie hit (orphaned receipts).
+        // Logging here surfaces "Annie's syncs have been failing for N days"
+        // to admin's weekly review query before it accumulates as a real
+        // data integrity problem.
+        logError('draft-sync', err, { employee_id: employeeId });
         return;
       } finally {
         clearTimeout(timeoutId);
@@ -6764,6 +6771,11 @@ async function finalizePP(employeeId, btnEl) {
     saveState(STATE);
   } catch (err) {
     console.error('[4f-8] finalizePP failed:', err);
+    logError('finalize', err, {
+      employee_id: employeeId,
+      pp: STATE.current_period && STATE.current_period.pp,
+      pay_period_id: STATE.current_period && STATE.current_period.pay_period_id,
+    });
     showToast('Could not finalize paystub — ' + (err.message || 'unknown error') + '. Nothing was saved; please try again.', 'error');
     return;
   }
@@ -10297,6 +10309,125 @@ async function dbDelete(table, options) {
 
 
 // ============================================================================
+// [ERR-LOG] Structured error logging to public.client_errors
+// ----------------------------------------------------------------------------
+// Best-effort fire-and-forget log of caught errors. The motivating case was
+// Annie's receipts orphaning silently for weeks: the sync's catch block
+// console.warn'd the failure and admin never saw it. With this helper called
+// from the catch blocks of every critical path, those failures land in a
+// queryable table so admin can run a daily/weekly review SQL (see queries
+// at the bottom of create-client-errors-table.sql).
+//
+// CRITICAL DESIGN RULE: logError must NEVER throw and must NEVER block.
+// Error logging that breaks the app is worse than no error logging.
+// All failures are silently swallowed.
+//
+// Args:
+//   operation — short identifier like 'sync', 'upload', 'finalize', 'hydrate'
+//   error     — Error object, string, or anything; we'll stringify it
+//   context   — optional ad-hoc object (e.g. {employee_id, paystub_id})
+//
+// Returns: nothing. Caller does not await — this runs in the background.
+//
+// Failure modes (all silent):
+//   * No access token (user not signed in) — skip
+//   * Network failure — swallow
+//   * RLS denial — swallow (shouldn't happen, INSERT policy is open to all auth'd users)
+//   * Bad payload — swallow
+// ============================================================================
+function logError(operation, error, context = {}) {
+  // Run the actual log async without awaiting. Wrapping in a try is belt-
+  // and-suspenders: the IIFE inside catches anything, but we still wrap
+  // here so any synchronous slip never escapes.
+  try {
+    (async () => {
+      try {
+        // No-op in dev mode (file://) — no Supabase, no network.
+        if (window.location.protocol === 'file:') return;
+
+        const token = await getStorageAccessToken();
+        if (!token) return;  // Not signed in — can't log
+
+        const message = (error && error.message) ? error.message
+                      : (error == null) ? '(no error)'
+                      : String(error);
+        const stack = (error && error.stack) ? error.stack : null;
+
+        // Strip any obviously-sensitive looking fields from context as a
+        // safety net. We don't expect callers to pass tokens, but defense
+        // in depth: never log anything that looks like a credential.
+        let safeContext = null;
+        if (context && typeof context === 'object' && Object.keys(context).length > 0) {
+          safeContext = {};
+          for (const [k, v] of Object.entries(context)) {
+            const ks = k.toLowerCase();
+            if (ks.includes('token') || ks.includes('password') || ks.includes('secret') || ks.includes('apikey')) {
+              continue;  // skip likely-credential fields
+            }
+            safeContext[k] = v;
+          }
+        }
+
+        const body = {
+          user_id:    (typeof currentUserId !== 'undefined' && currentUserId) || null,
+          user_role:  (typeof currentUserRole !== 'undefined' && currentUserRole) || null,
+          operation:  String(operation || 'unknown').slice(0, 100),
+          message:    String(message).slice(0, 5000),
+          stack:      stack ? String(stack).slice(0, 10000) : null,
+          url:        window.location.href.slice(0, 500),
+          user_agent: navigator.userAgent.slice(0, 500),
+          context:    safeContext,
+        };
+
+        // Plain fetch — no await on the response since we don't care about
+        // the return value. AbortController with 10s timeout so a hung
+        // network never holds anything up.
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort('log-timeout'), 10000);
+        try {
+          await fetch(`${SUPABASE_URL}/rest/v1/client_errors`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'apikey':        SUPABASE_ANON_KEY,
+              'Content-Type':  'application/json',
+              'Prefer':        'return=minimal',
+            },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (_) {
+        // Swallow — logging failures must not break the app.
+      }
+    })();
+  } catch (_) {
+    // Belt-and-suspenders — synchronous catch in case the async wrapper
+    // somehow throws before yielding.
+  }
+}
+
+// Global safety net: catch errors that escape the try/catch blocks
+// scattered through the app. These fire for any thrown error in event
+// handlers, async functions, etc. that wasn't caught by application code.
+// We don't suppress the default browser behavior (console error + red text
+// in DevTools) — we just additionally log the error so it's visible in
+// the database review.
+window.addEventListener('error', (e) => {
+  logError('window-error',
+    e.error || new Error(e.message || 'window.onerror with no message'),
+    { filename: e.filename, lineno: e.lineno, colno: e.colno }
+  );
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const err = e.reason instanceof Error ? e.reason : new Error(String(e.reason));
+  logError('unhandled-rejection', err);
+});
+
+
+// ============================================================================
 // ---- PHASE 4 CHUNK 4d — DATA ACCESS LAYER (DAL) ----
 // ============================================================================
 // Wraps all Supabase table reads/writes behind a single `DAL` namespace so
@@ -12440,6 +12571,7 @@ async function hydrateAndRender() {
     }
   } catch (err) {
     console.warn('[hydrate] Failed to hydrate from Supabase:', err);
+    logError('hydrate', err, { code: err && err.code });
     // [YE-2] If the hydrate failed because the year's tax_rates row is
     // missing, show a long-duration toast with the exact remediation
     // step. For any other hydrate error, the existing console.warn is
