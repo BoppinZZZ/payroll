@@ -1226,6 +1226,9 @@
     <div class="nav-item admin-only" data-view="year-end"><span class="icon">◆</span> Year-End</div>
     <!-- [AL-3] Activity Log: admin audit trail for paystub finalizes/edits/voids. -->
     <div class="nav-item admin-only" data-view="activity-log"><span class="icon">◆</span> Activity Log</div>
+    <!-- [ERR-UI] Errors: review the client_errors table from inside the app
+         instead of opening Supabase SQL Editor. Admin-only. -->
+    <div class="nav-item admin-only" data-view="errors"><span class="icon">◆</span> Errors</div>
 
     <div class="nav-label">Setup</div>
     <div class="nav-item admin-only" data-view="settings"><span class="icon">◆</span> Settings</div>
@@ -1422,7 +1425,7 @@ let currentUserId   = null;   // UUID of signed-in user, or null
 let currentUserName = null;   // full_name from profiles, or null
 // [E-1] Employees now have scoped views for dashboard, employees, tax-rates
 // (see E-2/E-3/E-7). Tax-filings, settings, year-end, activity-log stay admin-only.
-const ADMIN_ONLY_VIEWS = ['tax-filings', 'settings', 'year-end', 'activity-log'];
+const ADMIN_ONLY_VIEWS = ['tax-filings', 'settings', 'year-end', 'activity-log', 'errors'];
 
 
 // ============================================================================
@@ -7655,6 +7658,247 @@ function renderActivityLog() {
   `;
 }
 
+
+// ============================================================================
+// [ERR-UI] Errors review page — admin-only viewer for public.client_errors
+// ----------------------------------------------------------------------------
+// Pairs with the structured error logging shipped in ERR-LOG. Replaces the
+// "open Supabase SQL Editor and run a SELECT" workflow with an in-app page
+// that shows recent errors, filtered by date and operation type. Click a
+// row to expand and see the full stack trace + context.
+//
+// Loads via the same pattern as renderReceipts: render a loading shell on
+// navigation, kick off an async fetch, re-render when data arrives. The
+// page state lives in errorsPageState (module-level).
+//
+// FULL REMOVAL: delete this block, the sidebar nav item, the dispatch case
+// in showView, the 'errors' entry in ADMIN_ONLY_VIEWS, and the
+// DAL.getClientErrors method. Nothing else references the page.
+// ============================================================================
+
+let errorsPageState = {
+  loading:     false,
+  errors:      null,                // null = never loaded; [] = loaded but empty
+  loadError:   null,                // populated if the fetch itself fails
+  dateRange:   'last7',             // 'last7' | 'last30' | 'last90' | 'all'
+  operation:   'all',               // 'all' | one of the operation strings
+  expandedId:  null,                // id of the row whose details are showing
+};
+
+function setErrorsFilter(key, value) {
+  errorsPageState[key] = value;
+  // Date-range change requires a re-fetch (server-side filter); other
+  // filters are client-side and just need a re-render.
+  if (key === 'dateRange') {
+    loadErrorsData();
+  } else if (currentView === 'errors') {
+    const main = document.getElementById('main-content');
+    if (main) main.innerHTML = renderErrors();
+  }
+}
+
+function toggleErrorRow(id) {
+  errorsPageState.expandedId = errorsPageState.expandedId === id ? null : id;
+  if (currentView === 'errors') {
+    const main = document.getElementById('main-content');
+    if (main) main.innerHTML = renderErrors();
+  }
+}
+
+async function loadErrorsData() {
+  if (errorsPageState.loading) return;  // ignore re-entry
+  errorsPageState.loading = true;
+  errorsPageState.loadError = null;
+
+  // If user is on the page, show the spinner immediately.
+  if (currentView === 'errors') {
+    const main = document.getElementById('main-content');
+    if (main) main.innerHTML = renderErrors();
+  }
+
+  // Compute `since` from current dateRange. 'all' fetches everything; the
+  // limit (500) is the safety net.
+  const daysMap = { last7: 7, last30: 30, last90: 90 };
+  const days = daysMap[errorsPageState.dateRange] || null;
+  const since = days
+    ? new Date(Date.now() - days * 86400000).toISOString()
+    : null;
+
+  try {
+    const rows = await DAL.getClientErrors({ since, limit: 500 });
+    errorsPageState.errors = rows;
+    errorsPageState.loading = false;
+  } catch (err) {
+    console.error('[ERR-UI] load errors failed:', err);
+    errorsPageState.loadError = err;
+    errorsPageState.loading = false;
+  }
+
+  // Re-render with results (or error). Skip if user navigated away.
+  if (currentView === 'errors') {
+    const main = document.getElementById('main-content');
+    if (main) main.innerHTML = renderErrors();
+  }
+}
+
+function renderErrors() {
+  if (currentUserRole !== 'admin') return renderNonAdminStub();
+
+  const headerHtml = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Errors</div>
+        <div class="page-sub">Structured error log · review what's failing without opening the SQL editor</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <select class="quarter-select" style="min-width:160px;" onchange="setErrorsFilter('dateRange', this.value)" title="Filter by recency">
+          <option value="last7"  ${errorsPageState.dateRange === 'last7'  ? 'selected' : ''}>Last 7 days</option>
+          <option value="last30" ${errorsPageState.dateRange === 'last30' ? 'selected' : ''}>Last 30 days</option>
+          <option value="last90" ${errorsPageState.dateRange === 'last90' ? 'selected' : ''}>Last 90 days</option>
+          <option value="all"    ${errorsPageState.dateRange === 'all'    ? 'selected' : ''}>All time</option>
+        </select>
+        ${renderErrorsOperationFilter()}
+        <button class="btn" onclick="loadErrorsData()" title="Refresh from cloud">Refresh</button>
+      </div>
+    </div>
+  `;
+
+  if (errorsPageState.loading) {
+    return `${headerHtml}
+      <div class="panel">
+        <div class="panel-body" style="text-align:center; padding:48px 24px;">
+          <div class="hydrating-spinner" style="margin:0 auto 12px;"></div>
+          <div style="color:var(--muted);">Loading errors…</div>
+        </div>
+      </div>`;
+  }
+
+  if (errorsPageState.loadError) {
+    const msg = (errorsPageState.loadError && errorsPageState.loadError.message) || 'Unknown error';
+    return `${headerHtml}
+      <div class="panel">
+        <div class="panel-body" style="text-align:center; padding:48px 24px; color:var(--red);">
+          <div style="font-weight:600; margin-bottom:8px;">Could not load errors</div>
+          <div style="font-size:13px; margin-bottom:16px;">${esc(msg)}</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:16px;">If you haven't yet, make sure you ran create-client-errors-table.sql in Supabase.</div>
+          <button class="btn" onclick="loadErrorsData()">Try again</button>
+        </div>
+      </div>`;
+  }
+
+  const allErrors = errorsPageState.errors || [];
+
+  // Client-side operation filter
+  const filtered = errorsPageState.operation === 'all'
+    ? allErrors
+    : allErrors.filter(e => e.operation === errorsPageState.operation);
+
+  if (filtered.length === 0) {
+    const msg = allErrors.length === 0
+      ? `No errors in the selected time range. (If structured logging is working, this is the desired state.)`
+      : `No errors match the operation filter "${esc(errorsPageState.operation)}" in this time range.`;
+    return `${headerHtml}
+      <div class="panel">
+        <div class="panel-body" style="text-align:center; padding:48px 24px; color:var(--muted);">
+          ${msg}
+        </div>
+      </div>`;
+  }
+
+  const rows = filtered.map(e => {
+    const isExpanded = errorsPageState.expandedId === e.id;
+    const ts = formatActivityTimestamp(e.occurred_at);
+    const op = esc(e.operation || '');
+    const role = esc(e.user_role || '(unknown)');
+    const messagePreview = esc((e.message || '').slice(0, 120) + ((e.message || '').length > 120 ? '…' : ''));
+
+    let detailsHtml = '';
+    if (isExpanded) {
+      const ctx = e.context ? JSON.stringify(e.context, null, 2) : '(none)';
+      const stack = e.stack ? esc(e.stack) : '(no stack captured)';
+      const url   = esc(e.url || '');
+      const ua    = esc(e.user_agent || '');
+      detailsHtml = `
+        <tr>
+          <td colspan="5" style="background:var(--bg); padding:14px 18px;">
+            <div style="display:grid; grid-template-columns: 110px 1fr; row-gap:8px; column-gap:14px; font-size:13px;">
+              <div style="color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.06em; font-weight:600;">Full message</div>
+              <div style="white-space:pre-wrap;">${esc(e.message || '')}</div>
+              <div style="color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.06em; font-weight:600;">Stack</div>
+              <pre style="white-space:pre-wrap; font-family:'IBM Plex Mono', monospace; font-size:12px; margin:0; max-height:240px; overflow:auto;">${stack}</pre>
+              <div style="color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.06em; font-weight:600;">Context</div>
+              <pre style="white-space:pre-wrap; font-family:'IBM Plex Mono', monospace; font-size:12px; margin:0;">${esc(ctx)}</pre>
+              <div style="color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.06em; font-weight:600;">URL</div>
+              <div style="word-break:break-all;">${url}</div>
+              <div style="color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.06em; font-weight:600;">User agent</div>
+              <div style="word-break:break-all; color:var(--muted); font-size:12px;">${ua}</div>
+            </div>
+          </td>
+        </tr>
+      `;
+    }
+
+    return `
+      <tr class="clickable" onclick="toggleErrorRow('${e.id}')">
+        <td style="white-space:nowrap;">${esc(ts)}</td>
+        <td><span class="badge" style="background:var(--red-soft); color:var(--red);">${op}</span></td>
+        <td>${role}</td>
+        <td style="font-family:'IBM Plex Mono', monospace; font-size:12px;">${messagePreview}</td>
+        <td style="text-align:right; color:var(--muted); font-size:11px;">${isExpanded ? '▾' : '▸'}</td>
+      </tr>
+      ${detailsHtml}
+    `;
+  }).join('');
+
+  return `
+    ${headerHtml}
+    <div class="notice info">
+      <span>ℹ</span>
+      <div>Click any row to expand and see the full stack + context. Refresh to pull the latest from Supabase.</div>
+    </div>
+    <div class="panel">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:170px;">When</th>
+            <th style="width:140px;">Operation</th>
+            <th style="width:100px;">User role</th>
+            <th>Message</th>
+            <th style="width:30px;"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="font-size:12px; color:var(--muted); margin-top:10px;">
+      Showing ${filtered.length}${filtered.length !== allErrors.length ? ` of ${allErrors.length}` : ''} error${filtered.length === 1 ? '' : 's'}.
+    </div>
+  `;
+}
+
+// Build the operation-type dropdown from whatever operation strings actually
+// appear in the loaded data (no need to maintain a hardcoded list of
+// possible operations).
+function renderErrorsOperationFilter() {
+  const allErrors = errorsPageState.errors || [];
+  const ops = new Set();
+  for (const e of allErrors) {
+    if (e.operation) ops.add(e.operation);
+  }
+  const opList = Array.from(ops).sort();
+  const opOptions = [`<option value="all" ${errorsPageState.operation === 'all' ? 'selected' : ''}>All operations</option>`]
+    .concat(opList.map(op =>
+      `<option value="${esc(op)}" ${errorsPageState.operation === op ? 'selected' : ''}>${esc(op)}</option>`
+    ))
+    .join('');
+  return `
+    <select class="quarter-select" style="min-width:160px;" onchange="setErrorsFilter('operation', this.value)" title="Filter by operation type">
+      ${opOptions}
+    </select>
+  `;
+}
+
+
 // ============================================================================
 // 4d. SETTINGS — Company Info editor (Chunk 2: page shell only)
 // ----------------------------------------------------------------------------
@@ -8043,6 +8287,13 @@ function showView(viewName) {
   else if (viewName === "tax-filings") html = renderTaxFilings();
   else if (viewName === "year-end") html = renderYearEnd();
   else if (viewName === "activity-log") html = renderActivityLog();
+  else if (viewName === "errors") {
+    // [ERR-UI] Errors page renders a loading shell first, then the async
+    // loader fetches client_errors rows and re-renders in place. Always
+    // re-fetch on navigation so the admin sees current data.
+    html = renderErrors();
+    loadErrorsData();
+  }
   else if (viewName === "settings") html = renderSettings();
   else if (viewName === "tax-rates") html = renderTaxRates();
   else html = `<div class="empty">Unknown view</div>`;
@@ -10582,6 +10833,30 @@ const DAL = {
       throw error;
     }
     return data; // may be null
+  },
+
+
+  // ---- [ERR-UI] Fetch client_errors rows for the Errors review page ------
+  // Server-side filter by occurred_at >= since (an ISO string). Limit caps
+  // the result at `limit` rows (default 500) so we don't pull thousands of
+  // rows if errors ever blow up. Operation type and other filters are
+  // applied client-side after fetch — the dataset at this scale is small.
+  //
+  // RLS already restricts SELECT to admins, so this returns [] silently
+  // for non-admin callers rather than raising.
+  async getClientErrors({ since = null, limit = 500 } = {}) {
+    let q = supabaseClient
+      .from('client_errors')
+      .select('id, occurred_at, user_id, user_role, operation, message, stack, url, user_agent, context')
+      .order('occurred_at', { ascending: false })
+      .limit(limit);
+    if (since) q = q.gte('occurred_at', since);
+    const { data, error } = await q;
+    if (error) {
+      console.warn('DAL.getClientErrors error:', error.message || error);
+      throw error;
+    }
+    return data || [];
   },
 
 
