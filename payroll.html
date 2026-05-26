@@ -5880,6 +5880,28 @@ function backToEntryFromPreview(employeeId) {
 // Half-up rounding to 2 decimals — matches Excel ROUND(x, 2).
 function round2(x) { return Math.round(x * 100) / 100; }
 
+// [MR-1] Returns the IRS mileage rate for a specific year. Reads from
+// STATE.mileage_rates_by_year (populated by hydrate from the mileage_rates
+// table). Falls back to STATE.mileage_rate (the legacy single-value field)
+// if the requested year isn't in the map. Used when editing a historical
+// paystub so the recompute applies the rate from THAT paystub's year, not
+// the current year.
+//
+// Example: in 2027, editing a paystub from May 2026 should use 2026's rate
+// (0.725) — not 2027's rate (whatever it gets set to). Without this helper,
+// editPaystub would silently apply the current year's rate to old paystubs.
+//
+// If neither lookup yields a value, returns 0 (defensive — the caller's
+// math would be wrong but at least won't throw).
+function getMileageRateForYear(year) {
+  if (year != null
+      && STATE.mileage_rates_by_year
+      && STATE.mileage_rates_by_year[year] != null) {
+    return STATE.mileage_rates_by_year[year];
+  }
+  return STATE.mileage_rate || 0;
+}
+
 // Compute YTD gross pay for an employee up to but NOT including a given PP.
 // Used as "prior YTD" when calculating caps (SS, SUTA, ETT, FUTA).
 // Voided paystubs are excluded so cap math reflects what was actually paid.
@@ -8443,7 +8465,13 @@ async function submitEditPaystub() {
   const oldGross = Number(p.gross_pay) || 0;
   const newGross = round2(hoursNum * emp.hourly_rate);
   const mileage_miles   = round2(milesNum);
-  const mileage_dollars = round2(milesNum * STATE.mileage_rate);
+  // [MR-1] Use the mileage rate from this paystub's calendar year (derived
+  // from its end_date), not the current year's rate. Without this, editing
+  // a 2026 paystub in 2027 would silently apply the 2027 rate to the 2026
+  // miles. getMileageRateForYear falls back to STATE.mileage_rate if no
+  // year-specific row exists, so this is non-breaking for current data.
+  const paystubYear = yearOfDate(p.end_date) || new Date().getFullYear();
+  const mileage_dollars = round2(milesNum * getMileageRateForYear(paystubYear));
   const reimbursement   = round2(reimbNum);
   const gross_plus_reimb = round2(newGross + mileage_dollars + reimbursement);
 
@@ -10490,6 +10518,27 @@ const DAL = {
   },
 
 
+  // ---- [MR-1] Mileage rates table (year-keyed) ----------------------------
+  // Returns all rows from public.mileage_rates as a plain array, e.g.
+  //   [{ year: 2026, rate: 0.725 }, { year: 2027, rate: 0.730 }, ...]
+  // toAppState reshapes this into STATE.mileage_rates_by_year for fast
+  // year-keyed lookup. RLS allows any authenticated user to SELECT.
+  // Failure is non-fatal (returns []) because the existing
+  // companies.mileage_rate is the fallback path — see toAppState.
+  async getMileageRates() {
+    const { data, error } = await supabaseClient
+      .from('mileage_rates')
+      .select('year, rate')
+      .order('year', { ascending: false });
+
+    if (error) {
+      console.warn('DAL.getMileageRates error (non-fatal — falling back to companies.mileage_rate):', error.message || error);
+      return [];
+    }
+    return data || [];
+  },
+
+
   // ---- 4d-2b ---------------------------------------------------------------
   // Fetch all employees the current user is allowed to see.
   // RLS: admin sees all rows (employees_admin_all).
@@ -10944,13 +10993,15 @@ const DAL = {
   //   raw.paystubs.length     // -> 14
   async loadAll({ year = new Date().getFullYear() } = {}) {
     // [AL-1] profiles fetched in parallel for actor-name resolution in Activity Log.
-    const [company, taxRates, employees, payPeriods, paystubs, profiles] = await Promise.all([
+    // [MR-1] mileageRates added to the parallel fetch for year-keyed mileage rates.
+    const [company, taxRates, employees, payPeriods, paystubs, profiles, mileageRates] = await Promise.all([
       this.getCompany(),
       this.getTaxRates(year),
       this.getEmployees(),
       this.getPayPeriods({ year }),
       this.getPaystubs(),
       this.getProfiles(),
+      this.getMileageRates(),
     ]);
 
     // [YE-2 missing-tax-rates safety net] Throw a named error if the
@@ -10984,7 +11035,7 @@ const DAL = {
       ? await this.getDraftData(openPeriod.id)
       : { timesheets: [], timeEntries: [], mileageEntries: [], reimbursements: [] };
 
-    return { company, taxRates, employees, payPeriods, paystubs, draftData, profiles };
+    return { company, taxRates, employees, payPeriods, paystubs, draftData, profiles, mileageRates };
   },
 
 
@@ -11017,7 +11068,8 @@ const DAL = {
   //   console.log(state)
   //   // -> { company: {...}, tax_rates: {...}, mileage_rate: 0.725, ... }
   toAppState(raw) {
-    const { company, taxRates, employees, payPeriods, paystubs } = raw;
+    // [MR-1] mileageRates added to destructure for year-keyed lookup.
+    const { company, taxRates, employees, payPeriods, paystubs, mileageRates } = raw;
 
     // Coerce Supabase numeric-string to JS number; null/undefined -> 0.
     const N = v => (v == null ? 0 : Number(v));
@@ -11037,7 +11089,30 @@ const DAL = {
       email:               company.email               || '',
     } : {};
 
-    const mileageRate  = company && company.mileage_rate  != null ? N(company.mileage_rate) : 0.725;
+    // [MR-1] Reshape mileageRates rows into a year-keyed map:
+    //   STATE.mileage_rates_by_year = { 2026: 0.725, 2027: 0.730, ... }
+    // Used by getMileageRateForYear(year) when editing paystubs from a
+    // specific year and (potentially) any future year-spanning lookup.
+    const mileageRatesByYear = {};
+    for (const row of (mileageRates || [])) {
+      if (row && row.year != null && row.rate != null) {
+        mileageRatesByYear[row.year] = N(row.rate);
+      }
+    }
+
+    // [MR-1] STATE.mileage_rate (the legacy single-value field used by all
+    // display+calc sites that don't yet pass an explicit year) is sourced
+    // in this order:
+    //   1. mileage_rates_by_year[currentCalendarYear]  (preferred — table-managed)
+    //   2. companies.mileage_rate                      (backwards-compat fallback)
+    //   3. 0.725                                       (last-resort default)
+    // On Jan 1 once you've pre-loaded the 2027 row in mileage_rates, the
+    // hydrate just picks it up automatically — no code change required.
+    const currentYear = new Date().getFullYear();
+    const mileageRate =
+      mileageRatesByYear[currentYear] != null ? mileageRatesByYear[currentYear]
+      : (company && company.mileage_rate != null) ? N(company.mileage_rate)
+      : 0.725;
     const payFrequency = company && company.pay_frequency        ? company.pay_frequency    : 'bi-weekly';
 
     // ---- Tax rates (drop year column, convert numeric strings) ----
@@ -11290,14 +11365,15 @@ const DAL = {
     }
 
     return {
-      company:        stateCompany,
-      tax_rates:      stateTaxRates,
-      mileage_rate:   mileageRate,
-      pay_frequency:  payFrequency,
-      current_period: currentPeriod,
-      employees:      stateEmployees,
-      draft_period:   draftPeriod,
-      profiles_by_id: profilesById,
+      company:               stateCompany,
+      tax_rates:             stateTaxRates,
+      mileage_rate:          mileageRate,
+      mileage_rates_by_year: mileageRatesByYear,   // [MR-1] year-keyed map
+      pay_frequency:         payFrequency,
+      current_period:        currentPeriod,
+      employees:             stateEmployees,
+      draft_period:          draftPeriod,
+      profiles_by_id:        profilesById,
     };
   },
 
