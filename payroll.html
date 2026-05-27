@@ -1988,10 +1988,20 @@ function yearEndTotals(emp, year) {
     totals.box14_ca_sdi      += (p.taxes && p.taxes.ca_sdi)    || 0;
     totals.box17_state_wh    += (p.taxes && p.taxes.ca_state)  || 0;
   }
-  // Box 3 = SS wages subject to FICA. Cap at the year's ss_wage_base. For
-  // current employees nowhere near $176k this is just total gross, but the
-  // cap math protects us if a high earner enters the system.
-  const ssCap = (STATE.tax_rates && STATE.tax_rates.ss_wage_base) || Infinity;
+  // [YE-3] Box 3 = SS wages subject to FICA. Cap at the year-being-reported's
+  // ss_wage_base, NOT the currently-loaded STATE.tax_rates (which is always
+  // the calendar year you're running the app in). Otherwise generating a
+  // 2026 W-2 in Jan 2027 would apply 2027's higher cap to 2026 wages.
+  //
+  // Lookup order: year-specific row → current STATE.tax_rates → no cap.
+  // For your firm at current wage levels, all three branches produce the
+  // same answer (everyone's well below either cap). The fix matters when
+  // a high earner crosses the cap in a year whose rates aren't currently
+  // loaded.
+  const yearRates = (STATE.tax_rates_by_year && STATE.tax_rates_by_year[year]) || null;
+  const ssCap = (yearRates && yearRates.ss_wage_base)
+             || (STATE.tax_rates && STATE.tax_rates.ss_wage_base)
+             || Infinity;
   totals.box3_ss_wages = Math.min(totals.box1_wages, ssCap);
   return totals;
 }
@@ -6347,6 +6357,59 @@ function runTaxTests() {
       };
       // PP2 is in 2026. Prior YTD should be PP1 only = $1000.
       assertNear(priorYtdGrossFor(fakeEmp, 2), 1000, 'PP2 prior YTD = 2026 priors only');
+    });
+
+    // ─── [YE-3] W-2 Box 3 year-specific SS wage base ─────────────────────
+
+    it('[YE-3] Box 3 caps at the YEAR-being-reported wage base, not STATE.tax_rates', () => {
+      // Setup: pretend the app is loaded in 2027 with the 2027 cap, but
+      // we're generating a 2026 W-2. The fix should look up 2026's cap.
+      const origByYear = STATE.tax_rates_by_year;
+      const origRates  = STATE.tax_rates;
+      STATE.tax_rates_by_year = {
+        2026: { ss_wage_base: 184500 },
+        2027: { ss_wage_base: 200000 },
+      };
+      STATE.tax_rates = { ...STATE.tax_rates, ss_wage_base: 200000 };  // 2027 loaded
+
+      try {
+        // Employee earned $250K in 2026 — well above any cap.
+        const fakeEmp = {
+          periods: [
+            { pp: 1, gross_pay: 125000, end_date: '2026-06-01' },
+            { pp: 2, gross_pay: 125000, end_date: '2026-12-01' },
+          ],
+        };
+        const totals = yearEndTotals(fakeEmp, 2026);
+        // Box 1 wages = full gross (uncapped)
+        assertNear(totals.box1_wages, 250000, 'Box 1 wages uncapped');
+        // Box 3 SS wages = capped at 2026's wage base (184,500), NOT 2027's (200,000)
+        assertNear(totals.box3_ss_wages, 184500, 'Box 3 uses 2026 cap');
+      } finally {
+        STATE.tax_rates_by_year = origByYear;
+        STATE.tax_rates = origRates;
+      }
+    });
+
+    it('[YE-3] falls back to STATE.tax_rates when year has no by-year row', () => {
+      // Setup: no row for 2025 in the by-year map. Should fall back to
+      // STATE.tax_rates.ss_wage_base (current behavior pre-YE-3).
+      const origByYear = STATE.tax_rates_by_year;
+      STATE.tax_rates_by_year = {};  // empty
+
+      try {
+        const fakeEmp = {
+          periods: [
+            { pp: 1, gross_pay: 100000, end_date: '2025-06-01' },
+            { pp: 2, gross_pay: 100000, end_date: '2025-12-01' },
+          ],
+        };
+        const totals = yearEndTotals(fakeEmp, 2025);
+        // Should cap at STATE.tax_rates.ss_wage_base (stubbed at 184,500 above)
+        assertNear(totals.box3_ss_wages, 184500, 'Box 3 falls back to STATE cap');
+      } finally {
+        STATE.tax_rates_by_year = origByYear;
+      }
     });
 
   } finally {
@@ -10836,6 +10899,31 @@ const DAL = {
   },
 
 
+  // ---- [YE-3] Fetch ALL tax_rates years (for year-specific W-2 lookups) ---
+  // Returns an array of every row in tax_rates, e.g.
+  //   [{ year: 2026, ss_wage_base: 184500, ... }, { year: 2027, ... }]
+  // toAppState reshapes this into STATE.tax_rates_by_year for fast
+  // year-keyed lookup (mirrors how MR-1 handles mileage_rates).
+  //
+  // Used by yearEndTotals to cap W-2 Box 3 against the SS wage base
+  // that was in effect during the W-2's calendar year — not whatever's
+  // currently loaded as STATE.tax_rates.
+  //
+  // RLS: same as getTaxRates (anyone authenticated can SELECT).
+  async getAllTaxRates() {
+    const { data, error } = await supabaseClient
+      .from('tax_rates')
+      .select('year, ss_ee, medicare_ee, addl_medicare, fed_flat, ca_flat, ca_sdi, ss_er, medicare_er, suta, ett, futa, ss_wage_base, addl_medicare_threshold_single, state_unemployment_wage_base')
+      .order('year', { ascending: false });
+
+    if (error) {
+      console.warn('DAL.getAllTaxRates error (non-fatal — falling back to single-year STATE.tax_rates):', error.message || error);
+      return [];
+    }
+    return data || [];
+  },
+
+
   // ---- [ERR-UI] Fetch client_errors rows for the Errors review page ------
   // Server-side filter by occurred_at >= since (an ISO string). Limit caps
   // the result at `limit` rows (default 500) so we don't pull thousands of
@@ -11336,7 +11424,8 @@ const DAL = {
   async loadAll({ year = new Date().getFullYear() } = {}) {
     // [AL-1] profiles fetched in parallel for actor-name resolution in Activity Log.
     // [MR-1] mileageRates added to the parallel fetch for year-keyed mileage rates.
-    const [company, taxRates, employees, payPeriods, paystubs, profiles, mileageRates] = await Promise.all([
+    // [YE-3] allTaxRates added so yearEndTotals can look up SS wage base by year.
+    const [company, taxRates, employees, payPeriods, paystubs, profiles, mileageRates, allTaxRates] = await Promise.all([
       this.getCompany(),
       this.getTaxRates(year),
       this.getEmployees(),
@@ -11344,6 +11433,7 @@ const DAL = {
       this.getPaystubs(),
       this.getProfiles(),
       this.getMileageRates(),
+      this.getAllTaxRates(),
     ]);
 
     // [YE-2 missing-tax-rates safety net] Throw a named error if the
@@ -11377,7 +11467,7 @@ const DAL = {
       ? await this.getDraftData(openPeriod.id)
       : { timesheets: [], timeEntries: [], mileageEntries: [], reimbursements: [] };
 
-    return { company, taxRates, employees, payPeriods, paystubs, draftData, profiles, mileageRates };
+    return { company, taxRates, employees, payPeriods, paystubs, draftData, profiles, mileageRates, allTaxRates };
   },
 
 
@@ -11458,6 +11548,7 @@ const DAL = {
     const payFrequency = company && company.pay_frequency        ? company.pay_frequency    : 'bi-weekly';
 
     // ---- Tax rates (drop year column, convert numeric strings) ----
+    // Single-row shape used for live tax calculation (always the current year).
     const stateTaxRates = taxRates ? {
       ss_ee:                          N(taxRates.ss_ee),
       ss_er:                          N(taxRates.ss_er),
@@ -11474,6 +11565,32 @@ const DAL = {
       addl_medicare_threshold_single: N(taxRates.addl_medicare_threshold_single),
       state_unemployment_wage_base:   N(taxRates.state_unemployment_wage_base),
     } : {};
+
+    // [YE-3] Year-keyed map: STATE.tax_rates_by_year = { 2026: {...}, 2027: {...} }
+    // Used by yearEndTotals to look up the SS wage base for a specific W-2
+    // year (so Box 3 caps correctly when generating prior-year W-2s with
+    // the current year's rates loaded into STATE.tax_rates).
+    const taxRatesByYear = {};
+    for (const row of (raw.allTaxRates || [])) {
+      if (row && row.year != null) {
+        taxRatesByYear[row.year] = {
+          ss_ee:                          N(row.ss_ee),
+          ss_er:                          N(row.ss_er),
+          medicare_ee:                    N(row.medicare_ee),
+          medicare_er:                    N(row.medicare_er),
+          addl_medicare:                  N(row.addl_medicare),
+          fed_flat:                       N(row.fed_flat),
+          ca_flat:                        N(row.ca_flat),
+          ca_sdi:                         N(row.ca_sdi),
+          suta:                           N(row.suta),
+          ett:                            N(row.ett),
+          futa:                           N(row.futa),
+          ss_wage_base:                   N(row.ss_wage_base),
+          addl_medicare_threshold_single: N(row.addl_medicare_threshold_single),
+          state_unemployment_wage_base:   N(row.state_unemployment_wage_base),
+        };
+      }
+    }
 
     // ---- Current period (the one with status='open') ----
     // Schema doesn't constrain to 1 open period, but conventionally there
@@ -11709,6 +11826,7 @@ const DAL = {
     return {
       company:               stateCompany,
       tax_rates:             stateTaxRates,
+      tax_rates_by_year:     taxRatesByYear,        // [YE-3] year-keyed map
       mileage_rate:          mileageRate,
       mileage_rates_by_year: mileageRatesByYear,   // [MR-1] year-keyed map
       pay_frequency:         payFrequency,
