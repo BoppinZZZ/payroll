@@ -5244,6 +5244,23 @@ setInterval(() => {
 async function syncDraftToCloud(employeeId, signal) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: local-only
+
+  // [EMERGENCY-FIX] Sync can ONLY push the current user's own draft.
+  // An admin viewing another employee's data must NEVER push back — that
+  // turns a stale view into a destructive wipe of cloud data (which is
+  // exactly what happened on 2026-05-29 when Annie's 7 reimbursement rows
+  // got wiped by Chris's admin-side hydrate triggering a sync). Sync only
+  // proceeds if the requested employeeId matches the signed-in user's
+  // linked employee record. If findOwnEmployee returns null (e.g. admin
+  // hasn't been linked to an employee row), we block ALL sync — that's
+  // the safe failure mode because we'd rather skip a sync than corrupt
+  // cloud data.
+  const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
+  if (!ownEmp || ownEmp.id !== employeeId) {
+    console.warn('[EMERGENCY-FIX] sync blocked: only the signed-in user can sync their own draft. requested empId=' + employeeId + ', own empId=' + (ownEmp && ownEmp.id));
+    return;
+  }
+
   if (!STATE.current_period || !STATE.current_period.pay_period_id) return;
   if (!STATE.draft_period || !STATE.draft_period.entries) return;
   const entry = STATE.draft_period.entries[employeeId];
