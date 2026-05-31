@@ -2770,7 +2770,15 @@ function renderDraftProgressWidget() {
 // happen for a fresh employee whose profile hasn't been linked yet.
 function findOwnEmployee() {
   if (!currentUserId) return null;
-  return STATE.employees.find(e => e.profile_id === currentUserId) || null;
+  // [Tier3 I-6] Defensive: warn if multiple employees rows are linked to
+  // the same profile_id. This shouldn't happen — the DB should enforce
+  // uniqueness — but if it ever did (e.g., a manual SQL insert), the
+  // user would silently see whichever row sorted first with no signal.
+  const matches = STATE.employees.filter(e => e.profile_id === currentUserId);
+  if (matches.length > 1) {
+    console.warn('[findOwnEmployee] multiple employees linked to profile_id=' + currentUserId + '. Using the first match. Consider adding a UNIQUE constraint on employees.profile_id.');
+  }
+  return matches[0] || null;
 }
 
 function renderDashboard() {
@@ -5253,6 +5261,52 @@ window.addEventListener('storage', (e) => {
         20000
       );
     }
+  }
+});
+
+// [Tier3 C-3 + C-4] Cross-tab auth coordination. supabase-js stores the
+// current session under keys starting with `sb-` in localStorage. Writes
+// to those keys fire a `storage` event in OTHER tabs:
+//   * e.newValue === null  → another tab signed out. This tab is now a
+//     zombie session (UI still rendered, but tokens are gone). Force a
+//     reload so this tab also drops to the login view.
+//   * e.newValue is a fresh token whose `user.id` differs from this
+//     tab's in-memory currentUserId → another tab signed in as a
+//     DIFFERENT user. Our outbound fetches will now send the new user's
+//     token while our UI still shows the old user's data — a recipe
+//     for confusing display + observability errors. Force reload.
+//   * Same-user TOKEN_REFRESHED → no action needed (token shape is
+//     unchanged from this tab's perspective; getStorageAccessToken
+//     just reads the fresher token).
+window.addEventListener('storage', (e) => {
+  if (!e.key || !e.key.startsWith('sb-')) return;
+  // Defensive: only act in cloud mode where auth actually applies.
+  if (window.location.protocol === 'file:') return;
+
+  if (e.newValue === null) {
+    console.warn('[Tier3 C-3] another tab cleared the auth token — reloading to drop to login.');
+    try { location.reload(); } catch (_) {}
+    return;
+  }
+
+  // Extract the user id from the new token payload. supabase-js v2 wraps
+  // the session in different shapes depending on version; try both common
+  // ones (matches the lookup pattern in getStorageAccessToken).
+  try {
+    const parsed = JSON.parse(e.newValue);
+    const newUserId =
+      (parsed && parsed.user && parsed.user.id) ||
+      (parsed && parsed.currentSession && parsed.currentSession.user && parsed.currentSession.user.id) ||
+      null;
+    if (newUserId && typeof currentUserId !== 'undefined' && currentUserId
+        && newUserId !== currentUserId) {
+      console.warn('[Tier3 C-4] another tab signed in as a different user (was ' + currentUserId + ', now ' + newUserId + ') — reloading to resync.');
+      try { location.reload(); } catch (_) {}
+    }
+  } catch (_) {
+    // Parse failure — ignore. The token shape might be encrypted/encoded
+    // in a future supabase-js version; the safest no-op is to let the
+    // existing flow handle the next API call.
   }
 });
 
@@ -10950,7 +11004,7 @@ async function getStorageAccessToken() {
 //   * Returns parsed JSON on success. Our replace_* RPCs return void, so
 //     the body is empty and this returns null — which is fine, callers
 //     don't read the return value.
-async function rpcViaFetch(funcName, params, signal) {
+async function rpcViaFetch(funcName, params, signal, _isRetry) {
   const token = await getStorageAccessToken();
   if (!token) {
     throw new Error('Not signed in (no access token available). Please sign out and back in.');
@@ -10988,6 +11042,17 @@ async function rpcViaFetch(funcName, params, signal) {
     if (signal && externalAbortHandler) {
       signal.removeEventListener('abort', externalAbortHandler);
     }
+  }
+
+  // [Tier3 I-1] Single-shot retry on 401. supabase-js auto-refreshes the
+  // token in the background, but the localStorage payload may briefly lag
+  // the in-memory refresh. Waiting 300ms gives the auto-refresh time to
+  // write the new token; re-reading via getStorageAccessToken pulls it.
+  // _isRetry guards against an infinite loop if both attempts 401.
+  if (response.status === 401 && !_isRetry) {
+    console.warn('[Tier3 I-1] RPC ' + funcName + ' returned 401 — waiting 300ms and retrying with a fresh token.');
+    await new Promise(r => setTimeout(r, 300));
+    return await rpcViaFetch(funcName, params, signal, true);
   }
 
   if (!response.ok) {
@@ -11041,6 +11106,7 @@ async function crudViaFetch(method, table, options = {}) {
     body = null,
     returning = false,
     signal = null,
+    _isRetry = false,
   } = options;
 
   const token = await getStorageAccessToken();
@@ -11098,6 +11164,15 @@ async function crudViaFetch(method, table, options = {}) {
     if (signal && externalAbortHandler) {
       signal.removeEventListener('abort', externalAbortHandler);
     }
+  }
+
+  // [Tier3 I-1] Single-shot retry on 401 — same pattern as rpcViaFetch.
+  // Token may be stale relative to supabase-js's background auto-refresh;
+  // 300ms delay gives the refresh time to land before we re-read.
+  if (response.status === 401 && !_isRetry) {
+    console.warn('[Tier3 I-1] ' + method + ' ' + table + ' returned 401 — waiting 300ms and retrying with a fresh token.');
+    await new Promise(r => setTimeout(r, 300));
+    return await crudViaFetch(method, table, { ...options, _isRetry: true });
   }
 
   if (!response.ok) {
@@ -13485,10 +13560,25 @@ async function loadFromSupabase() {
 //     footer matches the freshly loaded current_period.
 // ============================================================================
 async function hydrateAndRender() {
+  // [Tier3 I-8] Capture the user ID at hydrate start. If the user signs
+  // out or switches identity mid-hydrate (network slow, user clicks
+  // signOut, or another tab signs in as a different user), we must NOT
+  // apply the loaded data — STATE would end up reflecting the OLD user
+  // while currentUserId reflects no-user-or-different-user, causing a
+  // cross-user data leak in memory (and on the console.log a line below).
+  // The cheap fix: bail before STATE assignment if user changed.
+  const userAtHydrateStart = (typeof currentUserId !== 'undefined') ? currentUserId : null;
+
   try {
     const next = await loadFromSupabase();
     if (!next || !next.employees) {
       console.warn('[hydrate] loadFromSupabase returned unexpected shape; keeping existing STATE.');
+      return;
+    }
+    // [Tier3 I-8] Verify the user hasn't changed since we started.
+    const userAtHydrateEnd = (typeof currentUserId !== 'undefined') ? currentUserId : null;
+    if (userAtHydrateStart !== userAtHydrateEnd) {
+      console.warn('[Tier3 I-8] hydrate aborted: user changed mid-hydrate (was ' + userAtHydrateStart + ', now ' + userAtHydrateEnd + '). Result discarded.');
       return;
     }
     STATE = next;
@@ -13789,14 +13879,36 @@ function showLoginStatus(kind, message) {
 // Handler for the sidebar "Sign out" button.
 async function signOut() {
   try {
+    // [Tier3 M-1] Abort any in-flight draft sync loops BEFORE the auth
+    // signOut clears tokens. Without this, the running syncs would hit
+    // 401 the moment supabase clears the token and log error spam to
+    // client_errors. Aborting them cleanly lets the loop's catch handler
+    // exit silently.
+    try {
+      if (typeof draftSyncState !== 'undefined') {
+        for (const [, s] of draftSyncState) {
+          if (s.abortController && !s.abortController.signal.aborted) {
+            s.abortController.abort('signout');
+          }
+        }
+      }
+    } catch (_) { /* defensive — never let cleanup break signOut */ }
+
+    // [Tier3 C-2] Clear the cached draft from localStorage so the next user
+    // to sign in on this device doesn't see Chris's typed-but-not-synced
+    // draft via the LF-1 overlay. LF-5 already restricts the overlay to
+    // the signed-in user's own employee, but this is defense-in-depth and
+    // prevents the data from ever sitting at rest under a different user.
+    try { localStorage.removeItem('payrollDraft'); } catch (_) {}
+
     const { error } = await supabaseClient.auth.signOut();
     if (error) {
       showToast('Could not sign out — ' + (error.message || 'unknown error'), 'error');
       return;
     }
     // On successful sign-out, the onAuthStateChange listener from 4b fires
-    // with session === null and automatically swaps to the login view.
-    // Nothing else to do here.
+    // with session === null. STATE reset happens in that listener so it
+    // also covers cross-tab sign-out (Tier3 C-1 / C-3).
   } catch (err) {
     showToast('Could not sign out. Please check your internet and try again.', 'error');
   }
@@ -13853,31 +13965,52 @@ async function loadCurrentUserProfile(session) {
     return;
   }
 
-  // Normal cloud login — query public.profiles for this user's row.
-  try {
-    const { data, error } = await supabaseClient
-      .from('profiles')
-      .select('id, role, full_name')
-      .eq('id', session.user.id)
-      .single();
+  // [Tier3 I-3] Retry with exponential backoff. A transient network blip on
+  // the profile fetch used to silently set `currentUserRole = null`, which
+  // applyRoleGating then treated as "non-admin" and locked Chris out of all
+  // admin features. requireAdmin() rejects every admin click with a confusing
+  // "only for admins" alert despite him actually being admin. The retry gives
+  // a few chances for the network to recover before falling through to the
+  // legacy null-role behavior. On final failure we surface a toast so the
+  // user knows to refresh.
+  const maxAttempts = 3;
+  const delaysMs    = [1000, 2000, 4000];  // 1s, 2s, 4s
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const { data, error } = await supabaseClient
+        .from('profiles')
+        .select('id, role, full_name')
+        .eq('id', session.user.id)
+        .single();
 
-    if (error) {
-      console.warn('[auth] Could not load profile:', error.message);
-      currentUserRole = null;
-      currentUserId   = session.user.id;
-      currentUserName = null;
-      return;
+      if (!error && data) {
+        currentUserId   = data.id;
+        currentUserRole = data.role;
+        currentUserName = data.full_name;
+        console.log('[auth] Profile loaded: role=' + currentUserRole + ', name=' + currentUserName + (attempt > 0 ? ' (after ' + (attempt + 1) + ' attempts)' : ''));
+        return;
+      }
+      console.warn('[auth] Could not load profile (attempt ' + (attempt + 1) + '/' + maxAttempts + '):', error && error.message);
+    } catch (err) {
+      console.warn('[auth] loadCurrentUserProfile error (attempt ' + (attempt + 1) + '/' + maxAttempts + '):', err);
     }
+    // Don't wait after the final attempt.
+    if (attempt < maxAttempts - 1) {
+      await new Promise(r => setTimeout(r, delaysMs[attempt]));
+    }
+  }
 
-    currentUserId   = data.id;
-    currentUserRole = data.role;
-    currentUserName = data.full_name;
-    console.log('[auth] Profile loaded: role=' + currentUserRole + ', name=' + currentUserName);
-  } catch (err) {
-    console.warn('[auth] loadCurrentUserProfile error:', err);
-    currentUserRole = null;
-    currentUserId   = null;
-    currentUserName = null;
+  // All retries failed — fall back to the legacy null-role behavior but
+  // surface a toast so the user knows they need to refresh.
+  currentUserRole = null;
+  currentUserId   = session.user.id;  // keep user id so auth-only paths still know who they are
+  currentUserName = null;
+  if (typeof showToast === 'function') {
+    showToast(
+      'Could not load your account permissions. Some features (admin actions, etc.) may be disabled until you refresh the page.',
+      'error',
+      15000
+    );
   }
 }
 
@@ -14007,6 +14140,24 @@ async function initAuth() {
       }
     } else {
       lastHydratedUserId = null;                 // [Tab-focus fix] reset so next sign-in re-hydrates
+      // [Tier3 C-1] Reset module-level STATE so the previous user's
+      // employees, paystubs, drafts don't sit in memory waiting to leak
+      // to the next user. If the next hydrate fails (network blip),
+      // current behavior would have kept the previous STATE — that's
+      // exactly the cross-user read leak this guards.
+      try {
+        if (typeof EMPTY_STATE !== 'undefined' && typeof deepClone === 'function') {
+          STATE = deepClone(EMPTY_STATE);
+        }
+        if (typeof currentView !== 'undefined') currentView = null;
+        if (typeof runPayrollSelectedEmp !== 'undefined') runPayrollSelectedEmp = null;
+      } catch (e) {
+        console.warn('[Tier3 C-1] STATE reset on sign-out failed:', e);
+      }
+      // [Tier3 C-2] Belt-and-suspenders localStorage clear in case sign-out
+      // was initiated from another tab and didn't go through our signOut()
+      // wrapper that already clears this.
+      try { localStorage.removeItem('payrollDraft'); } catch (_) {}
       showLoginView();
     }
   });
