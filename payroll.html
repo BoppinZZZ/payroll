@@ -1605,6 +1605,26 @@ function saveState(state) {
     }
   } catch (e) {
     console.warn('[LF-1] Failed to save draft to localStorage:', e);
+    // [Finding 4.2] Distinguish QuotaExceededError so the user gets a
+    // clear signal that local backup is disabled. Cloud sync still runs
+    // from in-memory STATE, so the data isn't necessarily lost — but if
+    // cloud sync ALSO fails, there's no local fallback.
+    const isQuota = e && (e.name === 'QuotaExceededError'
+                       || e.code === 22
+                       || (e.message && e.message.toLowerCase().includes('quota')));
+    if (isQuota && typeof showToast === 'function') {
+      // Only toast once per session — saveState fires constantly during
+      // typing, and we don't want to spam.
+      if (!window._loggedQuotaWarning) {
+        window._loggedQuotaWarning = true;
+        showToast(
+          "Browser local storage is full — your work is still being saved to the cloud, " +
+          "but the offline backup is disabled. Try closing other tabs or clearing site data.",
+          'warning',
+          12000
+        );
+      }
+    }
   }
 }
 
@@ -4577,6 +4597,7 @@ function getDraft() {
 // ---------- Draft mutators (each saves + triggers a re-render) ----------
 
 function updateDraftTime(employeeId, idx, field, value) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   const entry = draft.entries[employeeId];
   if (!entry || !entry.time_entries[idx]) return;
@@ -4586,6 +4607,7 @@ function updateDraftTime(employeeId, idx, field, value) {
   refreshRunPayroll();
 }
 function addDraftTime(employeeId) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   draft.entries[employeeId].time_entries.push({ date: "", clock_in: "", clock_out: "", notes: "" });
   saveState(STATE);
@@ -4593,6 +4615,7 @@ function addDraftTime(employeeId) {
   refreshRunPayroll();
 }
 function removeDraftTime(employeeId, idx) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   draft.entries[employeeId].time_entries.splice(idx, 1);
   saveState(STATE);
@@ -4601,6 +4624,7 @@ function removeDraftTime(employeeId, idx) {
 }
 
 function updateDraftMileage(employeeId, idx, field, value) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   const entry = draft.entries[employeeId];
   if (!entry || !entry.mileage_entries[idx]) return;
@@ -4610,6 +4634,7 @@ function updateDraftMileage(employeeId, idx, field, value) {
   refreshRunPayroll();
 }
 function addDraftMileage(employeeId) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   draft.entries[employeeId].mileage_entries.push({ date: "", miles: 0, description: "" });
   saveState(STATE);
@@ -4617,6 +4642,7 @@ function addDraftMileage(employeeId) {
   refreshRunPayroll();
 }
 function removeDraftMileage(employeeId, idx) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   draft.entries[employeeId].mileage_entries.splice(idx, 1);
   saveState(STATE);
@@ -4625,6 +4651,7 @@ function removeDraftMileage(employeeId, idx) {
 }
 
 function updateDraftReimb(employeeId, idx, field, value) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   const entry = draft.entries[employeeId];
   if (!entry || !entry.reimbursements[idx]) return;
@@ -4634,6 +4661,7 @@ function updateDraftReimb(employeeId, idx, field, value) {
   refreshRunPayroll();
 }
 function addDraftReimb(employeeId) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
   draft.entries[employeeId].reimbursements.push({ date: "", description: "", amount: 0, receipt_file_path: null });
   saveState(STATE);
@@ -4641,7 +4669,18 @@ function addDraftReimb(employeeId) {
   refreshRunPayroll();
 }
 function removeDraftReimb(employeeId, idx) {
+  if (!assertDraftMutable()) return;
   const draft = getDraft();
+  // [RECEIPT-GUARD] Same protection as removeReceiptFile — admin must not
+  // delete files from another user's Storage folder, even via the
+  // "Remove row" UI path. Only block in cloud mode; dev (file://) skips.
+  if (window.location.protocol !== 'file:') {
+    const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
+    if (!ownEmp || ownEmp.id !== employeeId) {
+      showToast('You can only remove rows from your own reimbursements.', 'warning', 6000);
+      return;
+    }
+  }
   // [RC-2] If the row had a receipt file attached, fire-and-forget delete it
   // from Storage so we don't accumulate orphans. Errors are logged but not
   // surfaced to the user — losing a file is a minor leak; blocking the
@@ -4684,6 +4723,20 @@ const receiptUploadInProgress = new Map();
 async function handleReceiptFileSelect(employeeId, idx, fileInput) {
   const file = fileInput && fileInput.files && fileInput.files[0];
   if (!file) return;
+
+  // [RECEIPT-GUARD] Refuse to upload receipts to another user's draft row.
+  // The upload IS the destructive operation — it pushes a file to Storage
+  // under the OTHER user's employee_id folder. Even if the subsequent
+  // sync is blocked (EMERGENCY-FIX), the file is now an orphan in their
+  // Storage folder. Mirror the same own-employee check used by sync.
+  if (window.location.protocol !== 'file:') {
+    const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
+    if (!ownEmp || ownEmp.id !== employeeId) {
+      showToast('You can only upload receipts to your own reimbursement rows. Ask the employee to upload their own receipts.', 'warning', 7000);
+      fileInput.value = '';
+      return;
+    }
+  }
 
   // Validate type + size client-side (the bucket also enforces these on the
   // server, but a client-side check gives a faster, friendlier error).
@@ -4827,6 +4880,20 @@ async function removeReceiptFile(employeeId, idx) {
   const path = entry.reimbursements[idx].receipt_file_path;
   if (!path) return;
 
+  // [RECEIPT-GUARD] Refuse to delete another user's receipt file. The
+  // delete happens IMMEDIATELY at the Storage layer (RLS allows admin
+  // to delete any receipt). The follow-up sync that would null the
+  // receipt_file_path column is blocked by EMERGENCY-FIX, so the cloud
+  // row keeps pointing at a deleted file — the user later sees a 404
+  // when they try to view it. Block at the handler level.
+  if (window.location.protocol !== 'file:') {
+    const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
+    if (!ownEmp || ownEmp.id !== employeeId) {
+      showToast('You can only remove receipts from your own reimbursement rows.', 'warning', 6000);
+      return;
+    }
+  }
+
   // Fire-and-forget delete — UI updates immediately even if the cloud
   // delete fails. Worst case we leak a file, which is minor.
   DAL.deleteReceiptFile(path).catch(err => {
@@ -4843,19 +4910,33 @@ async function removeReceiptFile(employeeId, idx) {
 function resetDraft() {
   if (!confirm("Clear all data entered for PP" + STATE.current_period.pp + "? This cannot be undone.")) return;
 
-  // [4f-10] Wipe cloud draft rows for every employee that had entries in
-  // this period. Fire-and-forget: localStorage is already cleared below,
-  // so even if the cloud wipe fails the UI shows "empty" correctly; the
-  // next per-employee sync will overwrite cloud with empty state.
+  // [RESET-FIX] Wipe cloud rows for the CURRENT USER's own employee only.
+  // Previously this iterated every key in STATE.draft_period.entries,
+  // which included stale localStorage overlays for OTHER employees —
+  // exactly the same bug class as the 2026-05-29 incident (admin's stale
+  // view of Annie wiped her cloud data). EMERGENCY-FIX in syncDraftToCloud
+  // protects the auto-sync path; this guard protects the "Clear all
+  // entries" button path.
+  //
+  // localStorage gets cleared regardless via `delete STATE.draft_period`
+  // below — the cloud cleanup is the only part that needs gating per-user.
   if (STATE.draft_period && STATE.draft_period.entries) {
-    const affectedEmpIds = Object.keys(STATE.draft_period.entries);
-    for (const empId of affectedEmpIds) {
-      clearEmployeeDraftCloud(empId)
-        .catch(err => console.error('[4f-10] reset cloud wipe failed for emp', empId, err));
+    const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
+    const ownEmpId = ownEmp ? ownEmp.id : null;
+    if (ownEmpId && STATE.draft_period.entries[ownEmpId]) {
+      clearEmployeeDraftCloud(ownEmpId)
+        .catch(err => console.error('[4f-10] reset cloud wipe failed for emp', ownEmpId, err));
+    } else if (!ownEmpId) {
+      console.warn('[RESET-FIX] resetDraft: no own employee linked — local state reset only, no cloud wipe attempted.');
     }
   }
 
   delete STATE.draft_period;
+  // [Finding 4.3] Clear the stale payrollDraft entry from localStorage so a
+  // subsequent hydrate doesn't see a half-cleared snapshot that LF-5 might
+  // try to overlay. (LF-5 already restricts to own-user entries, but
+  // clearing the stale key is cleaner.)
+  try { localStorage.removeItem('payrollDraft'); } catch (_) {}
   saveState(STATE);
   refreshRunPayroll();
 }
@@ -5033,6 +5114,65 @@ async function runDraftSyncLoop(employeeId, s) {
 // ----------------------------------------------------------------------------
 const draftAutoSaveTimers = new Map();   // employeeId -> setTimeout id
 
+// [FINALIZE-RACE] Module flag that is true while finalizePP is mid-flight.
+// Blocks draft mutators (so typing can't diverge the paystub from the
+// timesheet's child rows) and tells the visibilitychange handler not to
+// abort the in-flight pre-finalize sync (otherwise finalize proceeds with
+// half-written cloud rows and rollover then deletes draft_period before
+// the re-sync can complete).
+let isFinalizing = false;
+
+// Helper for draft mutators. Returns true if it's safe to mutate; shows
+// a toast and returns false if a finalize is in flight.
+function assertDraftMutable() {
+  if (isFinalizing) {
+    if (typeof showToast === 'function') {
+      showToast('Finalize is in progress — please wait a few seconds before editing.', 'warning', 4000);
+    }
+    return false;
+  }
+  return true;
+}
+
+// [MULTI-TAB-FIX] When the user has TWO browser tabs open on the same
+// origin and one tab writes payrollDraft to localStorage, the browser
+// fires a `storage` event in the OTHER tab. We use that signal to detect
+// cross-tab races: this tab's in-memory STATE is now stale relative to
+// whatever the other tab just wrote, so syncing from here would
+// destructively wipe the other tab's fresh data via the wipe-and-replace
+// RPCs. Same bug family as the 2026-05-29 Annie incident, just triggered
+// by a second tab instead of a stale localStorage overlay.
+//
+// Once this flag flips true we BLOCK all draft syncs from this tab until
+// the user refreshes. A refresh re-hydrates from cloud + clears the flag
+// in the new module load. The user-visible signal is a long-duration
+// warning toast at the moment the cross-tab write is detected.
+let crossTabConflictDetected = false;
+
+window.addEventListener('storage', (e) => {
+  // We only care about the draft key. Other localStorage keys (Supabase's
+  // sb-* session, etc.) are not our concern.
+  if (e.key !== 'payrollDraft') return;
+  // Ignore deletions (e.newValue === null) — those happen on rollover/reset
+  // and are intentional. Only WRITES from other tabs are conflicts.
+  if (e.newValue === null) return;
+
+  if (!crossTabConflictDetected) {
+    crossTabConflictDetected = true;
+    console.warn('[MULTI-TAB-FIX] another tab wrote payrollDraft — blocking sync from this tab until refresh.');
+    // Toast can be skipped in dev mode (no cloud sync = no risk).
+    if (window.location.protocol !== 'file:' && typeof showToast === 'function') {
+      showToast(
+        'Another browser tab modified payroll data. To avoid overwriting it, ' +
+        'cloud sync from THIS tab is paused. Refresh this tab to load the latest, ' +
+        'then continue.',
+        'warning',
+        20000
+      );
+    }
+  }
+});
+
 function scheduleDraftSync(employeeId, delayMs = 0) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: no cloud sync
@@ -5150,6 +5290,16 @@ function flushAllPendingDraftSyncs() {
 // any in-flight sync when the tab goes hidden, and RESTART when it returns.
 window.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
+    // [FINALIZE-RACE 2.2] Don't abort syncs while a finalize is in flight.
+    // The pre-finalize `await queueDraftSync(employeeId)` is the only thing
+    // standing between "user typed in a half-state" and "paystub written
+    // with stale cloud child rows." Aborting it here would let finalize
+    // proceed against half-synced cloud data, and rolloverToNextPeriod
+    // would then delete draft_period before the re-sync could complete.
+    if (isFinalizing) {
+      console.log('[FINALIZE-RACE] visibility=hidden during finalize — NOT aborting sync.');
+      return;
+    }
     // Tab is going to background. Abort any in-flight sync so it doesn't
     // hang in a throttled state. The runDraftSyncLoop catch handler
     // detects 'hidden' and exits cleanly with dirty=true preserved.
@@ -5258,6 +5408,16 @@ async function syncDraftToCloud(employeeId, signal) {
   const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
   if (!ownEmp || ownEmp.id !== employeeId) {
     console.warn('[EMERGENCY-FIX] sync blocked: only the signed-in user can sync their own draft. requested empId=' + employeeId + ', own empId=' + (ownEmp && ownEmp.id));
+    return;
+  }
+
+  // [MULTI-TAB-FIX] Refuse to sync if another browser tab has written
+  // newer data to payrollDraft. The storage event listener at the top of
+  // this section sets crossTabConflictDetected when that happens. Without
+  // this check, two tabs can race and the loser's wipe-and-replace
+  // destroys the winner's data (same bug family as Annie).
+  if (crossTabConflictDetected) {
+    console.warn('[MULTI-TAB-FIX] sync blocked: another tab has newer data. Refresh required to resume sync.');
     return;
   }
 
@@ -5431,6 +5591,17 @@ async function clearEmployeeDraftCloud(employeeId) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;
   if (!STATE.current_period || !STATE.current_period.pay_period_id) return;
+
+  // [RESET-FIX] Same defense as EMERGENCY-FIX in syncDraftToCloud: refuse
+  // to wipe cloud data for any employee other than the current user. The
+  // legitimate caller (resetDraft) already filters to the own-employee
+  // case; this guard is defense-in-depth for any future caller that
+  // forgets.
+  const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
+  if (!ownEmp || ownEmp.id !== employeeId) {
+    console.warn('[RESET-FIX] clearEmployeeDraftCloud blocked: only the signed-in user can clear their own draft. requested empId=' + employeeId + ', own empId=' + (ownEmp && ownEmp.id));
+    return;
+  }
 
   // [SESS-7] plain-fetch CRUD bypass. Same logic as before:
   //   1. Find the timesheet for this (employee, current period). If none,
@@ -6705,6 +6876,16 @@ async function finalizePP(employeeId, btnEl) {
   // becomes a harmless no-op. On error paths it restores the button so the
   // user can retry.
   const resetButton = setButtonLoading(btnEl, 'Finalizing…');
+
+  // [FINALIZE-RACE 2.1 + 2.2] Set the global flag so:
+  //   * Draft mutators (updateDraftTime, etc.) bail with a toast — typing
+  //     during finalize can't diverge the paystub from the timesheet
+  //     child rows.
+  //   * The visibilitychange handler skips its abort-in-flight-syncs
+  //     branch, so the pre-finalize `await queueDraftSync()` can complete
+  //     even if the tab momentarily loses focus.
+  // Cleared in the finally block regardless of success / error.
+  isFinalizing = true;
   try {
   const emp = STATE.employees.find(e => e.id === employeeId);
   if (!emp) { alert("Employee not found"); return; }
@@ -6955,6 +7136,10 @@ async function finalizePP(employeeId, btnEl) {
     viewPaystub(employeeId, justFinalizedPP);
   }
   } finally {
+    // [FINALIZE-RACE] Always clear the global guard so subsequent edits
+    // are unblocked. Runs even on error so a failed finalize doesn't leave
+    // the user permanently locked out of typing.
+    isFinalizing = false;
     // [LS-2] Reset the button. On nav-paths the button is detached from the
     // DOM (innerHTML was replaced by viewPaystub/viewDepositSummary), so this
     // is a no-op visually. On error paths the user can retry from the same button.
@@ -7029,6 +7214,12 @@ async function rolloverToNextPeriod() {
 
   STATE.current_period = next;
   delete STATE.draft_period;
+  // [Finding 4.3] Clear the stale payrollDraft entry from localStorage so a
+  // subsequent hydrate doesn't see a half-cleared snapshot from the old
+  // period. saveState below would skip writing because state.draft_period
+  // is undefined now, but it doesn't clean up the previous value — that's
+  // why we explicitly remove it here.
+  try { localStorage.removeItem('payrollDraft'); } catch (_) {}
   saveState(STATE);
   // Live-update the footer "current period" label (matches the startup IIFE formatting)
   const label = document.getElementById("current-period-label");
@@ -7106,11 +7297,35 @@ function handleImportBackupFile(evt) {
     const pp = incoming.current_period.pp;
     const totalPaystubs = incoming.employees.reduce((n, e) => n + ((e.periods || []).length), 0);
     const exportedAt = parsed.exported_at ? ("\n  Backup taken: " + new Date(parsed.exported_at).toLocaleString()) : "";
-    const msg = `Import this backup?\n\n  Employees: ${empCount}\n  Current period: PP${pp}\n  Paystubs in history: ${totalPaystubs}${exportedAt}\n\nThis will REPLACE all current data. If you want to keep what you have now, click Cancel and Export a backup first.`;
+    // [BACKUP-PREVIEW] The previous behavior was misleading: it overwrote
+    // STATE + saveState'd to localStorage, then let any subsequent draft
+    // mutation push the (potentially months-old) imported snapshot to
+    // cloud via wipe-and-replace — destroying current cloud data. The
+    // import path was never wired up to a server-side restore endpoint,
+    // so there's no way to actually persist the backup as live data from
+    // the browser. Treat it as a LOCAL-ONLY PREVIEW: load into memory,
+    // skip the localStorage write, block all subsequent cloud syncs from
+    // this tab until refresh. Admin can browse the historical snapshot
+    // safely; refresh returns to current live data.
+    const msg = `Import this backup as a LOCAL PREVIEW?\n\n` +
+      `  Employees: ${empCount}\n  Current period: PP${pp}\n  Paystubs in history: ${totalPaystubs}${exportedAt}\n\n` +
+      `IMPORTANT: this is a read-only preview. Your LIVE cloud data will NOT be ` +
+      `replaced — that requires manual database restore (contact support). When you're ` +
+      `done viewing the backup, refresh this tab to return to live data.`;
     if (!confirm(msg)) return;
     STATE = incoming;
-    saveState(STATE);
-    showToast('Backup restored.', 'success');
+    // Intentionally skip saveState — don't persist imported snapshot to
+    // localStorage where it could leak to cloud via LF-5 overlay on next
+    // hydrate. The crossTabConflictDetected flag below blocks all syncs
+    // for this tab regardless. Refresh clears both (page load resets the
+    // module variable and localStorage was never written).
+    crossTabConflictDetected = true;
+    showToast(
+      'Backup loaded as a LOCAL PREVIEW. Your live cloud data is untouched and ' +
+      'cloud sync from this tab is paused. Refresh this tab when you\'re done viewing.',
+      'warning',
+      20000
+    );
     showView("dashboard");
   };
   reader.onerror = function() {
@@ -8723,7 +8938,14 @@ function wouldSsCapRippleAffectLaterPaystubs(emp, pp, oldGross, newGross) {
 // Reports a summary in the returned object so the caller can show a toast.
 //
 // Returns: { recomputed: [pp...], skipped: [pp...], failed: [{pp, error}...] }
-async function recomputeDownstreamPaystubs(emp, editedPp) {
+async function recomputeDownstreamPaystubs(emp, editedPp, options = {}) {
+  // [VOID-CASCADE] options:
+  //   skipConfirm  — true: run immediately, no confirm() dialog. Used by
+  //                  void/restore where the recompute is always desired
+  //                  (a void/restore necessarily changes downstream YTD).
+  //   reason       — short string for the confirm() message, e.g.
+  //                  "gross changed" (default), "was voided", "was restored".
+  //                  Only shown when skipConfirm is false.
   const editedPeriod = emp.periods.find(p => p.pp === editedPp);
   if (!editedPeriod) {
     return { recomputed: [], skipped: [], failed: [] };
@@ -8744,17 +8966,20 @@ async function recomputeDownstreamPaystubs(emp, editedPp) {
     return { recomputed: [], skipped: [], failed: [] };
   }
 
-  const ok = confirm(
-    `${downstream.length} later paystub${downstream.length === 1 ? '' : 's'} ` +
-    `for ${emp.name} may need tax recomputation now that PP${editedPp}'s gross changed:\n\n` +
-    `  Affected: ${downstream.map(p => 'PP' + p.pp).join(', ')}\n\n` +
-    `Click OK to auto-recompute taxes on each (gross/hours stay the same — only ` +
-    `the cap-affected tax components change).\n` +
-    `Click Cancel to skip — you can manually open each later paystub and click ` +
-    `Edit → Save Changes to refresh them one at a time.`
-  );
-  if (!ok) {
-    return { recomputed: [], skipped: downstream.map(p => p.pp), failed: [] };
+  if (!options.skipConfirm) {
+    const reason = options.reason || `gross changed`;
+    const ok = confirm(
+      `${downstream.length} later paystub${downstream.length === 1 ? '' : 's'} ` +
+      `for ${emp.name} may need tax recomputation now that PP${editedPp} ${reason}:\n\n` +
+      `  Affected: ${downstream.map(p => 'PP' + p.pp).join(', ')}\n\n` +
+      `Click OK to auto-recompute taxes on each (gross/hours stay the same — only ` +
+      `the cap-affected tax components change).\n` +
+      `Click Cancel to skip — you can manually open each later paystub and click ` +
+      `Edit → Save Changes to refresh them one at a time.`
+    );
+    if (!ok) {
+      return { recomputed: [], skipped: downstream.map(p => p.pp), failed: [] };
+    }
   }
 
   const recomputed = [];
@@ -8971,10 +9196,17 @@ async function submitEditPaystub() {
     let cascadeKind = 'success';
     try {
       const cascade = await recomputeDownstreamPaystubs(emp, pp);
-      if (cascade.recomputed.length > 0 || cascade.failed.length > 0) {
+      if (cascade.recomputed.length > 0 || cascade.failed.length > 0 || cascade.skipped.length > 0) {
         const parts = [];
         if (cascade.recomputed.length > 0) {
           parts.push(`Recomputed: ${cascade.recomputed.map(n => 'PP' + n).join(', ')}.`);
+        }
+        if (cascade.skipped.length > 0) {
+          // [Finding 3.2] Surface the skipped paystubs — user clicked Cancel
+          // on the recompute confirm. Their stored taxes are now potentially
+          // stale relative to the new YTD basis. Worth knowing.
+          parts.push(`Skipped (their taxes may now be stale): ${cascade.skipped.map(n => 'PP' + n).join(', ')}. Open each and click Edit → Save Changes to refresh.`);
+          cascadeKind = 'warning';
         }
         if (cascade.failed.length > 0) {
           parts.push(`Failed: ${cascade.failed.map(f => `PP${f.pp}`).join(', ')} — open each and click Edit → Save Changes to retry.`);
@@ -9642,6 +9874,46 @@ async function voidPaystub(employeeId, pp, btnEl) {
     p.voided = true;
     p.voided_at = nowIsoShort();
     saveState(STATE);
+
+    // [VOID-CASCADE] Voiding a paystub changes the YTD basis for every
+    // same-year downstream paystub (their stored SS / SUTA / ETT / FUTA
+    // taxes were computed against a YTD that included PP${pp}'s gross).
+    // Without this recompute, voids silently corrupt W-2 totals and
+    // quarterly tax filings. skipConfirm:true because the user already
+    // confirmed the void itself — no need to re-ask.
+    try {
+      const result = await recomputeDownstreamPaystubs(emp, pp, {
+        skipConfirm: true,
+        reason: 'was voided',
+      });
+      if (result.recomputed && result.recomputed.length > 0) {
+        showToast(
+          `PP${pp} voided. Auto-recomputed ${result.recomputed.length} later paystub${result.recomputed.length === 1 ? '' : 's'} ` +
+          `(${result.recomputed.map(n => 'PP' + n).join(', ')}) to reflect the new YTD basis.`,
+          'success',
+          6000
+        );
+      }
+      if (result.failed && result.failed.length > 0) {
+        showToast(
+          `PP${pp} voided, but ${result.failed.length} downstream paystub${result.failed.length === 1 ? '' : 's'} ` +
+          `failed to auto-recompute: ${result.failed.map(f => 'PP' + f.pp).join(', ')}. ` +
+          `Open each and Edit → Save Changes to refresh manually.`,
+          'error',
+          10000
+        );
+      }
+    } catch (cascadeErr) {
+      console.error('[VOID-CASCADE] downstream recompute failed:', cascadeErr);
+      logError('void-cascade', cascadeErr, { employee_id: employeeId, voided_pp: pp });
+      showToast(
+        `PP${pp} voided successfully, but the downstream tax recompute hit an error. ` +
+        `Review later paystubs and re-save if needed.`,
+        'warning',
+        8000
+      );
+    }
+
     viewPaystub(employeeId, pp);  // re-render so the VOIDED banner and Restore button appear
   } catch (err) {
     console.error('[4f-5] voidPaystub failed:', err);
@@ -9683,6 +9955,43 @@ async function restorePaystub(employeeId, pp, btnEl) {
     p.voided = false;
     delete p.voided_at;  // keep the object shape clean
     saveState(STATE);
+
+    // [VOID-CASCADE] Restoring a paystub also changes downstream YTD basis
+    // (the previously-excluded gross now counts again). Mirror the void
+    // recompute exactly so the inverse operation is symmetric.
+    try {
+      const result = await recomputeDownstreamPaystubs(emp, pp, {
+        skipConfirm: true,
+        reason: 'was restored',
+      });
+      if (result.recomputed && result.recomputed.length > 0) {
+        showToast(
+          `PP${pp} restored. Auto-recomputed ${result.recomputed.length} later paystub${result.recomputed.length === 1 ? '' : 's'} ` +
+          `(${result.recomputed.map(n => 'PP' + n).join(', ')}) to reflect the new YTD basis.`,
+          'success',
+          6000
+        );
+      }
+      if (result.failed && result.failed.length > 0) {
+        showToast(
+          `PP${pp} restored, but ${result.failed.length} downstream paystub${result.failed.length === 1 ? '' : 's'} ` +
+          `failed to auto-recompute: ${result.failed.map(f => 'PP' + f.pp).join(', ')}. ` +
+          `Open each and Edit → Save Changes to refresh manually.`,
+          'error',
+          10000
+        );
+      }
+    } catch (cascadeErr) {
+      console.error('[VOID-CASCADE] downstream recompute failed:', cascadeErr);
+      logError('restore-cascade', cascadeErr, { employee_id: employeeId, restored_pp: pp });
+      showToast(
+        `PP${pp} restored successfully, but the downstream tax recompute hit an error. ` +
+        `Review later paystubs and re-save if needed.`,
+        'warning',
+        8000
+      );
+    }
+
     viewPaystub(employeeId, pp);  // re-render — banner disappears, Edit/Void buttons return
   } catch (err) {
     console.error('[4f-6] restorePaystub failed:', err);
