@@ -13084,26 +13084,36 @@ async function hydrateAndRender() {
           // data. Hydrate creates placeholder entries (padded blank rows) for
           // every employee, and those get persisted to localStorage on saveState.
           // Without this filter, those placeholders would override fresh cloud
-          // data from other employees on every hydrate — the admin's view of
-          // a co-worker's draft would always be stuck at the snapshot from the
-          // admin's LAST page load.
+          // data from other employees on every hydrate.
           //
-          // draftEntryHasData() checks for any non-empty clock_in / miles /
-          // reimbursement — so an entry with real typed values survives, while
-          // a hydrated blank placeholder does not.
+          // [LF-5] Restrict the overlay to the CURRENT SIGNED-IN USER's own
+          // employee record. localStorage exists to preserve THIS user's
+          // in-flight typed drafts across page refreshes — it was never meant
+          // to override OTHER employees' state. The original LF-4 filter
+          // caught empty placeholders, but a stale-yet-non-empty cached entry
+          // (e.g. admin's cached snapshot of Annie from when she only had
+          // 3 time entries) would still override fresh cloud data. Worse,
+          // before EMERGENCY-FIX shipped, that stale STATE would then sync
+          // BACK to the cloud — destructively wiping Annie's newer data.
+          // EMERGENCY-FIX prevents the destructive sync; LF-5 fixes the
+          // display half so admin always sees the cloud truth for everyone
+          // except themselves.
           const cloudEntries  = STATE.draft_period?.entries || {};
           const localEntries  = local.draft_period.entries || {};
+          const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
+          const ownEmpId = ownEmp ? ownEmp.id : null;
           const meaningfulLocal = {};
-          for (const [empId, entry] of Object.entries(localEntries)) {
-            if (draftEntryHasData(entry)) {
-              meaningfulLocal[empId] = entry;
+          if (ownEmpId) {
+            const ownEntry = localEntries[ownEmpId];
+            if (ownEntry && draftEntryHasData(ownEntry)) {
+              meaningfulLocal[ownEmpId] = ownEntry;
             }
           }
           STATE.draft_period = {
             ...STATE.draft_period,
             entries: { ...cloudEntries, ...meaningfulLocal },
           };
-          console.log('[LF-1] restored draft from localStorage (savedAt=' + new Date(local.savedAt).toLocaleTimeString() + ', meaningful entries=' + Object.keys(meaningfulLocal).length + ')');
+          console.log('[LF-1/LF-5] restored draft from localStorage (savedAt=' + new Date(local.savedAt).toLocaleTimeString() + ', own-empId=' + ownEmpId + ', restored=' + Object.keys(meaningfulLocal).length + ')');
         }
       }
     } catch (e) {
