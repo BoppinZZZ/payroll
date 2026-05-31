@@ -1769,7 +1769,18 @@ let activityLogFilter = {
 // ============================================================================
 
 function money(n) {
-  if (n === null || n === undefined || isNaN(n)) return "$0.00";
+  if (n === null || n === undefined || isNaN(n)) {
+    // [Tier2 V-6] Defensive: never render "$NaN" or undefined to the UI.
+    // But warn loudly so calculation bugs aren't silently masked as $0.00.
+    // The warn fires once per page load per call site to avoid console
+    // spam from repeated renders. (Note: typeof check distinguishes NaN
+    // (a real bug) from null/undefined (often valid "no data" cases —
+    // we only warn on NaN.)
+    if (typeof n === 'number' && isNaN(n)) {
+      console.warn('[money] received NaN — possible silent calculation bug. Rendering as $0.00. Stack:', new Error().stack);
+    }
+    return "$0.00";
+  }
   const sign = n < 0 ? "-" : "";
   return sign + "$" + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
@@ -1830,10 +1841,36 @@ function periodTaxes(p) {
 }
 
 // YTD totals for a specific employee UP TO (and including) a given pay period
-// Used on paystubs to show the YTD column correctly
+// Used on paystubs to show the YTD column correctly.
+//
+// [Tier2 C-1] Filter to the CALENDAR YEAR of the target pp. pp numbers
+// increment monotonically across years (computeNextPeriod does curr.pp+1
+// without resetting at Jan 1), so without this filter PP27 in 2027 sees
+// PP1-PP26 from 2026 and the YTD column on a 2027 paystub shows lifetime
+// totals instead of 2027 YTD. Tax engine already filters by year (see
+// YE-1 in priorYtdGrossFor); this fix brings the DISPLAY into line.
 function ytdThroughPeriod(employee, pp) {
-  const included = employee.periods.filter(p => p.pp <= pp);
+  const targetPeriod = employee.periods.find(p => p.pp === pp);
+  const targetYear = targetPeriod ? yearOfDate(targetPeriod.end_date) : null;
+  const included = employee.periods.filter(p =>
+    p.pp <= pp &&
+    (targetYear == null || yearOfDate(p.end_date) === targetYear)
+  );
   return ytdTotals(included);
+}
+
+// [Tier2 C-1] Sum YTD totals for an employee restricted to a calendar year.
+// Use this in admin dashboards / employee cards where "YTD" means "current
+// calendar year." Per-paystub views use ytdThroughPeriod above so each
+// paystub's YTD column reflects the year-up-to-that-stub.
+//
+// History page intentionally still calls bare ytdTotals(emp.periods) for
+// LIFETIME totals — it shows every paystub across all years, so its
+// totals match what's visible. Don't apply this helper there.
+function ytdTotalsForYear(emp, year) {
+  if (!emp || !emp.periods) return ytdTotals([]);
+  const periods = emp.periods.filter(p => yearOfDate(p.end_date) === year);
+  return ytdTotals(periods);
 }
 
 // --------------------------------------------------------------------------
@@ -2385,6 +2422,34 @@ function depositSummaryForPaystub(emp, p) {
   const addlMedicareWages = Math.max(0, currentOverThr - priorOverThr);
   const addlMedicareWithheld = round2(addlMedicareWages * (r.addl_medicare || 0.009));
 
+  // [Tier2 C-2] Additional Medicare 0.9% is computed here for the deposit
+  // total (the firm IS legally on the hook to remit it), but the engine
+  // does NOT currently withhold it from the employee's paystub —
+  // calcPaystubTaxes returns no addl_medicare field. Two consequences if
+  // this ever triggers non-zero:
+  //   * EFTPS-941 deposit includes 0.9% the firm never collected from
+  //     the employee. Employer pays out of pocket; employee owes that
+  //     tax on their personal return.
+  //   * W-2 Box 6 (Medicare withheld) understates by the same amount.
+  // At current low-wage levels this is permanently $0 and there's no
+  // financial mismatch. If a future high earner crosses $200K YTD this
+  // logs a loud error so the inconsistency surfaces immediately and
+  // the tax engine can be extended to withhold addl_medicare properly
+  // (calcPaystubTaxes + buildPeriodFromDraft + yearEndTotals + tests).
+  if (addlMedicareWithheld > 0 && typeof logError === 'function') {
+    logError('addl-medicare-not-withheld', new Error(
+      `Additional Medicare 0.9% of $${addlMedicareWithheld.toFixed(2)} ` +
+      `computed for the firm's deposit but NOT withheld from the employee. ` +
+      `Tax engine extension needed — see Tier 2 C-2 audit finding.`
+    ), {
+      employee_id:        emp && emp.id,
+      paystub_pp:         p && p.pp,
+      gross,
+      prior_ytd:          priorYtd,
+      addl_medicare_wages: addlMedicareWages,
+    });
+  }
+
   // Employee withholdings (stored on the paystub)
   const fit         = p.taxes.federal  || 0;
   const caPit       = p.taxes.ca_state || 0;
@@ -2716,8 +2781,12 @@ function renderDashboard() {
   }
 
   // Compute combined YTD across all employees
+  // [Tier2 C-1] Filter to the current calendar year so the dashboard header
+  // ("2026 tax year") matches the numbers shown below. Without this, on
+  // Jan 1 2027 the dashboard would show 2026+2027 combined as "2027 YTD."
+  const currentYearForYtd = new Date().getFullYear();
   const combinedYtd = STATE.employees.reduce((acc, emp) => {
-    const t = ytdTotals(emp.periods);
+    const t = ytdTotalsForYear(emp, currentYearForYtd);
     acc.gross += t.gross;
     acc.reimb += t.reimb;
     acc.taxes += t.federal + t.ca_state + t.ss + t.medicare + t.ca_sdi;
@@ -2751,8 +2820,10 @@ function renderDashboard() {
   }).join("");
 
   // YTD by employee table rows
+  // [Tier2 C-1] Filter to current calendar year — the column is "YTD" not "Lifetime".
+  // Also makes the SUTA $7K cap check accurate (cap resets every Jan 1).
   const ytdRows = STATE.employees.map(emp => {
-    const t = ytdTotals(emp.periods);
+    const t = ytdTotalsForYear(emp, currentYearForYtd);
     const capReached = t.gross >= STATE.tax_rates.state_unemployment_wage_base;
     return `
       <tr>
@@ -2861,7 +2932,8 @@ function renderEmployeeDashboard() {
   if (!emp) return renderNonAdminStub();
 
   // YTD totals already exclude voided paystubs via ytdTotals -> isPaystubActive.
-  const ytd = ytdTotals(emp.periods);
+  // [Tier2 C-1] Filter to current calendar year — this card shows "YTD" not lifetime.
+  const ytd = ytdTotalsForYear(emp, new Date().getFullYear());
   const ytdTaxes = ytd.federal + ytd.ca_state + ytd.ss + ytd.medicare + ytd.ca_sdi;
 
   // Current-period status pill (reuses the same helper the admin widget uses).
@@ -2977,8 +3049,10 @@ function renderEmployees() {
   const visibleEmps = STATE.employees.filter(emp =>
     emp.active || (emp.periods && emp.periods.length > 0)
   );
+  // [Tier2 C-1] Employees page YTD column is current-year, not lifetime.
+  const currentYearForEmpYtd = new Date().getFullYear();
   const rows = visibleEmps.map(emp => {
-    const t = ytdTotals(emp.periods);
+    const t = ytdTotalsForYear(emp, currentYearForEmpYtd);
     const last = emp.periods[emp.periods.length - 1];
     // Actions column — Edit is always available; second button is Remove (if active) or Reactivate (if inactive)
     const editBtn = `<button class="btn small ghost admin-only" onclick="openEditEmployeeModal('${emp.id}')" title="Edit name, title, rate, or avatar" style="color: var(--primary);">Edit</button>`;
@@ -3041,7 +3115,8 @@ function renderEmployeeOwnRecord() {
   if (!emp) return renderNonAdminStub();
 
   // YTD totals for the info panel (already excludes voided paystubs).
-  const ytd = ytdTotals(emp.periods);
+  // [Tier2 C-1] Filter to current calendar year — "YTD" semantics.
+  const ytd = ytdTotalsForYear(emp, new Date().getFullYear());
   const activeCount = emp.periods.filter(isPaystubActive).length;
 
   // Avatar — either custom initials/letters or auto-derived from the name.
@@ -4396,7 +4471,7 @@ function renderPaystub(employeeId, pp) {
         ${p.mileage_dollars > 0 ? `
         <div class="earnings-row">
           <div>Mileage</div>
-          <div class="num-cell">${money(STATE.mileage_rate)}</div>
+          <div class="num-cell">${money(getMileageRateForYear(yearOfDate(p.end_date)))}</div>
           <div class="num-cell">${p.mileage_miles.toFixed(2)} mi</div>
           <div class="num-cell">${money(p.mileage_dollars)}</div>
           <div class="num-cell">—</div>
@@ -4628,7 +4703,12 @@ function updateDraftMileage(employeeId, idx, field, value) {
   const draft = getDraft();
   const entry = draft.entries[employeeId];
   if (!entry || !entry.mileage_entries[idx]) return;
-  entry.mileage_entries[idx][field] = field === "miles" ? (parseFloat(value) || 0) : value;
+  // [Tier2 I-4] Clamp negatives at 0. The HTML input has min="0" but the
+  // constraint is browser-only — pasted values or arrow-down past 0 in
+  // some browsers bypasses it. Negative miles flow through to a NEGATIVE
+  // mileage_dollars, reducing the employee's net pay, which is silent
+  // and wrong. Refunds should be a separate reimbursement entry.
+  entry.mileage_entries[idx][field] = field === "miles" ? Math.max(0, parseFloat(value) || 0) : value;
   saveState(STATE);
   scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
@@ -4655,7 +4735,10 @@ function updateDraftReimb(employeeId, idx, field, value) {
   const draft = getDraft();
   const entry = draft.entries[employeeId];
   if (!entry || !entry.reimbursements[idx]) return;
-  entry.reimbursements[idx][field] = field === "amount" ? (parseFloat(value) || 0) : value;
+  // [Tier2 I-4] Clamp negatives at 0. Same rationale as updateDraftMileage:
+  // negative amounts produce a silently-reduced gross_plus_reimb and net
+  // pay. Use a separate reimbursement entry for legitimate refunds.
+  entry.reimbursements[idx][field] = field === "amount" ? Math.max(0, parseFloat(value) || 0) : value;
   saveState(STATE);
   scheduleDraftSync(employeeId);   // [AS-1] debounced cloud auto-save
   refreshRunPayroll();
@@ -5637,7 +5720,20 @@ function summarizeDraftEmployee(employee, entry) {
   });
   let totalMiles = 0;
   entry.mileage_entries.forEach(me => { totalMiles += (me.miles || 0); });
-  const mileageDollars = totalMiles * STATE.mileage_rate;
+  // [Tier2 I-1] Use the mileage rate for the CURRENT PAY PERIOD's calendar
+  // year (determined by end_date) rather than the bare STATE.mileage_rate.
+  // Matters at year boundaries: a period ending Dec 30 2026 that gets
+  // finalized on Jan 3 2027 (after a refresh loaded 2027 rates) would
+  // otherwise apply 2027's rate to 2026 miles. The historical-edit path
+  // already does this via getMileageRateForYear; bring the finalize path
+  // in line.
+  const periodYear = (STATE.current_period && STATE.current_period.end)
+    ? yearOfDate(STATE.current_period.end)
+    : new Date().getFullYear();
+  const periodMileageRate = (typeof getMileageRateForYear === 'function')
+    ? getMileageRateForYear(periodYear)
+    : STATE.mileage_rate;
+  const mileageDollars = totalMiles * periodMileageRate;
   let totalReimb = 0;
   entry.reimbursements.forEach(re => { totalReimb += (re.amount || 0); });
   const grossPay = totalHours * employee.hourly_rate;
@@ -6704,7 +6800,16 @@ function renderPreviewPaystub(employeeId) {
     : `<strong style="color:var(--amber)">Not finalized</strong>`;
 
   // YTD through this period (inclusive) — temporarily include the computed period
-  const ytd = ytdTotals(emp.periods.filter(p => p.pp < period.pp).concat([period]));
+  // [Tier2 C-1] Preview paystub YTD must also filter by calendar year.
+  // For PP27 (in 2027), only PP1-26 from 2027 should count toward this
+  // preview's YTD column. Without this filter, the preview includes
+  // 2026 paystubs.
+  const previewYear = yearOfDate(period.end_date);
+  const ytd = ytdTotals(
+    emp.periods
+      .filter(p => p.pp < period.pp && (previewYear == null || yearOfDate(p.end_date) === previewYear))
+      .concat([period])
+  );
   const pStart = periodStart(period.end_date);
 
   // Pay date from current_period (or compute day after end_date as fallback)
@@ -6804,7 +6909,7 @@ function renderPreviewPaystub(employeeId) {
         ${period.mileage_dollars > 0 ? `
         <div class="earnings-row">
           <div>Mileage</div>
-          <div class="num-cell">${money(STATE.mileage_rate)}</div>
+          <div class="num-cell">${money(getMileageRateForYear(yearOfDate(period.end_date)))}</div>
           <div class="num-cell">${period.mileage_miles.toFixed(2)} mi</div>
           <div class="num-cell">${money(period.mileage_dollars)}</div>
           <div class="num-cell">—</div>
@@ -7681,7 +7786,6 @@ function renderReceiptsMileageBody(isAdmin) {
   const empById = {};
   for (const e of (STATE.employees || [])) empById[e.id] = e;
   const currentPp = STATE.current_period && STATE.current_period.pp;
-  const mileageRate = STATE.mileage_rate || 0;
 
   let totalMiles = 0;
   let totalDollars = 0;
@@ -7695,7 +7799,14 @@ function renderReceiptsMileageBody(isAdmin) {
       ? '<span class="rcpt-status-pill draft">Draft</span>'
       : '<span class="rcpt-status-pill finalized">Finalized</span>';
     const miles = Number(m.miles) || 0;
-    const dollars = miles * mileageRate;
+    // [Tier2 I-6] Apply the mileage rate that was in effect for this
+    // row's pay period (by its end_date year), not the current year's
+    // rate. Matters in 2027 when looking at 2026 mileage rows.
+    const rowYear = pp.end_date ? yearOfDate(pp.end_date) : null;
+    const rowMileageRate = rowYear != null
+      ? getMileageRateForYear(rowYear)
+      : (STATE.mileage_rate || 0);
+    const dollars = miles * rowMileageRate;
     totalMiles += miles;
     totalDollars += dollars;
     const purpose = (m.description || '').trim();
@@ -9080,13 +9191,23 @@ async function submitEditPaystub() {
   if (!valid) return;
 
   // --- Recompute paystub using the same tax engine buildPeriodFromDraft uses ---
-  // NOTE: uses the employee's CURRENT hourly_rate (same as finalize does). The
-  // paystub's on-screen "Rate" column already shows emp.hourly_rate, so this
-  // keeps everything consistent. If Anna ever raises a rate and then edits an
-  // old paystub, the recalc will use the new rate. That's usually what you want
-  // for corrections; if not, revert the rate temporarily before editing.
+  // [Tier2 I-2] Derive the hourly rate from the paystub's original
+  // gross / hours instead of using emp.hourly_rate. The previous behavior
+  // silently applied the CURRENT rate to a historical edit — so if Anna
+  // raised Annie's rate from $20 to $25 and then later fixed a typo on
+  // a Q1 paystub, the gross would jump by 25%. That gross change also
+  // poisoned every downstream paystub's YTD-cap math (via the cascade
+  // recompute, which uses the new gross).
+  //
+  // gross / hours recovers the rate that was effective at finalize time
+  // without needing a new schema column. Falls back to emp.hourly_rate
+  // only for $0/0hr paystubs where the snapshot isn't recoverable.
   const oldGross = Number(p.gross_pay) || 0;
-  const newGross = round2(hoursNum * emp.hourly_rate);
+  const oldHours = Number(p.total_hours) || 0;
+  const snapshotRate = (oldHours > 0)
+    ? (oldGross / oldHours)
+    : (emp.hourly_rate || 0);
+  const newGross = round2(hoursNum * snapshotRate);
   const mileage_miles   = round2(milesNum);
   // [MR-1] Use the mileage rate from this paystub's calendar year (derived
   // from its end_date), not the current year's rate. Without this, editing
@@ -9784,7 +9905,9 @@ function downloadPaystubPdf(employeeId, pp) {
     section('Reimbursements (Non-Taxable)');
     drawRow(['Description', 'Rate', 'Qty', 'Current', 'YTD'], { bold: true, size: 9, color: 100 });
     if (p.mileage_dollars > 0) {
-      drawRow(['Mileage', fmtMoney(STATE.mileage_rate), (p.mileage_miles || 0).toFixed(2) + ' mi', fmtMoney(p.mileage_dollars), '—']);
+      // [Tier2 I-6] Show the rate that was in effect in the paystub's calendar
+      // year, not the currently-loaded STATE.mileage_rate.
+      drawRow(['Mileage', fmtMoney(getMileageRateForYear(yearOfDate(p.end_date))), (p.mileage_miles || 0).toFixed(2) + ' mi', fmtMoney(p.mileage_dollars), '—']);
     }
     if (p.reimbursement > 0) {
       drawRow(['Expense reimbursement', '—', '—', fmtMoney(p.reimbursement), '—']);
