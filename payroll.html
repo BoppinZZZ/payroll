@@ -1925,13 +1925,44 @@ function quartersWithPaystubs() {
   }).sort((a, b) => a.year - b.year || a.quarter - b.quarter);
 }
 
-// Active (non-voided) paystubs for this employee whose end_date is in the given quarter.
+// [Tier4 C-2] Cash-basis (pay_date) helper used for tax-form aggregation.
+// IRS Pub 15 §11: wages are taxable when ACTUALLY PAID, not when earned.
+// `priorYtdGrossFor` and friends correctly stay end_date-based (cap math
+// is work-based — SS / SUTA caps reset on Jan 1 of the work year). But
+// W-2, 941, 940, DE 9 / DE 9C aggregations must filter by pay_date —
+// otherwise a paystub for a period ending Mar 31 (pay date Apr 1) lands
+// on Q1 941 even though the cash hit the employee in Q2.
+//
+// Paystubs in memory carry `end_date` but not `pay_date` (the schema
+// holds pay_date on the pay_periods row, not on paystubs). Per this
+// firm's convention (computeNextPeriod at line ~7167, finalize flow),
+// pay_date = end_date + 1 day. If we ever store pay_date on the paystub
+// row, this helper picks it up automatically.
+function payDateOf(p) {
+  if (!p) return null;
+  if (p.pay_date) return p.pay_date;
+  if (!p.end_date) return null;
+  // end_date + 1 day, as ISO YYYY-MM-DD.
+  try {
+    const d = new Date(p.end_date + 'T00:00:00');
+    d.setDate(d.getDate() + 1);
+    return toIsoLocal(d);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Active (non-voided) paystubs for this employee whose PAY DATE is in
+// the given quarter. (Note: filter is cash-basis per Tier4 C-2 — the
+// previous version used end_date which is the work-basis. Cap math
+// helpers like priorYtdGrossFor intentionally stay end_date-based.)
 function paystubsInQuarter(emp, year, quarter) {
-  return emp.periods.filter(p =>
-    isPaystubActive(p) &&
-    yearOfDate(p.end_date) === year &&
-    quarterOfDate(p.end_date) === quarter
-  );
+  return emp.periods.filter(p => {
+    if (!isPaystubActive(p)) return false;
+    const pay = payDateOf(p);
+    if (!pay) return false;
+    return yearOfDate(pay) === year && quarterOfDate(pay) === quarter;
+  });
 }
 
 // [PS-1] Returns a deduplicated, sorted list of pay periods that have at
@@ -1976,12 +2007,16 @@ function ytdGrossThroughPP(emp, year, throughPp) {
 // --------------------------------------------------------------------------
 
 // Active (non-voided) paystubs for this employee in the given calendar year,
-// determined by end_date. Mirrors paystubsInQuarter for consistency.
+// determined by PAY DATE (cash-basis per Tier4 C-2). Used by W-2 generation
+// and any other tax-form aggregation. The cap math (priorYtdGrossFor)
+// stays end_date-based intentionally — see payDateOf comment above.
 function paystubsInYear(emp, year) {
-  return emp.periods.filter(p =>
-    isPaystubActive(p) &&
-    yearOfDate(p.end_date) === year
-  );
+  return emp.periods.filter(p => {
+    if (!isPaystubActive(p)) return false;
+    const pay = payDateOf(p);
+    if (!pay) return false;
+    return yearOfDate(pay) === year;
+  });
 }
 
 // Sorted list of years that have at least one active paystub anywhere in the firm.
@@ -2294,7 +2329,13 @@ function form941Line1(year, quarter) {
       if (!isPaystubActive(p)) return;
       if (p.end_date >= targetDate) anyPaystubReachesTarget = true;
       const start = periodStart(p.end_date);  // bi-weekly: end - 13 days
-      if (start <= targetDate && targetDate <= p.end_date) {
+      // [Tier4 C-3] IRS Form 941 instruction for Line 1: "count employees
+      // who received wages, tips, or other compensation in the pay period
+      // including March 12 (June 12 / September 12 / December 12)."
+      // Zero-gross paystubs for terminated or on-leave employees must
+      // NOT be counted. Without this filter, a terminated employee with
+      // a $0 final paystub spanning Mar 12 would still be counted.
+      if (start <= targetDate && targetDate <= p.end_date && (p.gross_pay || 0) > 0) {
         emps.add(emp.id);
       }
     });
@@ -3926,7 +3967,45 @@ function renderForm941Section(selected) {
   const line5d_col2 = round2(t.addl_medicare_wages * r.addl_medicare);
   const line5e     = round2(line5a_col2 + line5c_col2 + line5d_col2);
   const line6      = round2(t.fit + line5e);
-  const line10     = line6;  // No adjustments assumed for a simple small-firm payroll
+
+  // [Tier4 C-1] Form 941 Lines 7-15 — previously the form rendering stopped
+  // at "Line 10 = Line 6" which is incorrect (real Line 10 is Line 6 ± 7
+  // ± 8 ± 9). Without Lines 11-15 the admin couldn't transcribe the form
+  // onto an actual IRS 941 without manual math, and any cents-level
+  // discrepancy between Line 10 and actual deposits would produce a
+  // CP-220/CP-138 reconciliation letter from the IRS.
+  //
+  // Line 7 — fractions-of-cents adjustment. The form's clean rate × wage
+  // calc (Line 5a/5c/5d Col 2) doesn't match the sum of per-paystub
+  // round2'd amounts that were actually deposited. Line 7 captures that
+  // pennies-level difference so the form's Line 10 reconciles to deposits.
+  const depositedSocMed = round2(t.ss_ee + t.ss_er + t.medicare_ee + t.medicare_er);
+  const formCleanSocMed = round2(line5a_col2 + line5c_col2);
+  const line7 = round2(depositedSocMed - formCleanSocMed);
+
+  // Line 10 — Total taxes after adjustments (Line 6 + 7, no 8/9 used).
+  const line10 = round2(line6 + line7);
+
+  // Line 11 — Qualified small-business payroll tax credit. Always $0 for
+  // this firm (no R&D credit election). Field must exist on the form.
+  const line11 = 0;
+
+  // Line 12 — Total taxes after adjustments and credits = Line 10 − Line 11.
+  const line12 = round2(line10 - line11);
+
+  // Line 13 — Total deposits for this quarter (actual EFTPS-941 paid).
+  // Sum of per-paystub deposit amounts; matches what Chris wrote on EFTPS.
+  // Uses t.fit + per-paystub round2'd SS/Medicare. addl_medicare uses the
+  // rate × wage formula (matches depositSummaryForPaystub at the paystub
+  // level).
+  const line13 = round2(
+    t.fit + t.ss_ee + t.ss_er + t.medicare_ee + t.medicare_er + line5d_col2
+  );
+
+  // Line 14 — Balance due (if Line 12 > Line 13, the firm owes more).
+  const line14 = round2(Math.max(0, line12 - line13));
+  // Line 15 — Overpayment (if Line 13 > Line 12, the firm overpaid).
+  const line15 = round2(Math.max(0, line13 - line12));
 
   // Line 1 display
   const targetMonthName = { 1: "March", 2: "June", 3: "September", 4: "December" }[selected.quarter];
@@ -4044,13 +4123,67 @@ function renderForm941Section(selected) {
         <div class="tf-form-line-amt">${money(line6)}</div>
       </div>
 
-      <div class="tf-form-line total-final">
+      <div class="tf-form-line">
+        <div class="tf-form-line-num">Line 7</div>
+        <div>
+          <div class="tf-form-line-desc">Fractions-of-cents adjustment</div>
+          <div class="tf-form-line-sub">Per-paystub round-to-cents vs. quarter-level rate × wage. Usually small (pennies).</div>
+        </div>
+        <div class="tf-form-line-amt">${money(line7)}</div>
+      </div>
+
+      <div class="tf-form-line">
         <div class="tf-form-line-num">Line 10</div>
         <div>
           <div class="tf-form-line-desc">Total taxes after adjustments</div>
-          <div class="tf-form-line-sub">Same as Line 6 if no fractions-of-cents or sick-pay adjustments apply</div>
+          <div class="tf-form-line-sub">Line 6 + Line 7 (no sick-pay or other adjustments)</div>
         </div>
         <div class="tf-form-line-amt">${money(line10)}</div>
+      </div>
+
+      <div class="tf-form-line">
+        <div class="tf-form-line-num">Line 11</div>
+        <div>
+          <div class="tf-form-line-desc">Qualified small-business payroll tax credit for R&D</div>
+          <div class="tf-form-line-sub">$0 unless the firm has elected this credit on Form 8974</div>
+        </div>
+        <div class="tf-form-line-amt">${money(line11)}</div>
+      </div>
+
+      <div class="tf-form-line total-final">
+        <div class="tf-form-line-num">Line 12</div>
+        <div>
+          <div class="tf-form-line-desc">Total taxes after adjustments and credits</div>
+          <div class="tf-form-line-sub">Line 10 − Line 11. This is what you owe for the quarter.</div>
+        </div>
+        <div class="tf-form-line-amt">${money(line12)}</div>
+      </div>
+
+      <div class="tf-form-line">
+        <div class="tf-form-line-num">Line 13</div>
+        <div>
+          <div class="tf-form-line-desc">Total deposits for this quarter</div>
+          <div class="tf-form-line-sub">Sum of EFTPS-941 deposits made for each paystub in this quarter.</div>
+        </div>
+        <div class="tf-form-line-amt">${money(line13)}</div>
+      </div>
+
+      <div class="tf-form-line ${line14 > 0 ? 'tf-form-line-attention' : ''}">
+        <div class="tf-form-line-num">Line 14</div>
+        <div>
+          <div class="tf-form-line-desc">Balance due</div>
+          <div class="tf-form-line-sub">If Line 12 &gt; Line 13. Pay this amount with the 941 filing.</div>
+        </div>
+        <div class="tf-form-line-amt">${money(line14)}</div>
+      </div>
+
+      <div class="tf-form-line">
+        <div class="tf-form-line-num">Line 15</div>
+        <div>
+          <div class="tf-form-line-desc">Overpayment</div>
+          <div class="tf-form-line-sub">If Line 13 &gt; Line 12. Apply to next return or request refund.</div>
+        </div>
+        <div class="tf-form-line-amt">${money(line15)}</div>
       </div>
     </div>
   `;
@@ -9188,6 +9321,13 @@ async function recomputeDownstreamPaystubs(emp, editedPp, options = {}) {
           suta:                  newEmployerTaxes.suta,
           ett:                   newEmployerTaxes.ett,
           futa:                  newEmployerTaxes.futa,
+        }, {
+          // [Tier4 C-5] Attribute cascade-recomputed paystubs to the user
+          // who triggered the void/edit. Without this the Activity Log
+          // shows "PP4 edited at TIMESTAMP by (unknown user)" — bad for
+          // any future audit/compliance review. DAL.updatePaystub also
+          // bumps edit_count via opts.lastEditedBy path.
+          lastEditedBy: (typeof currentUserId !== 'undefined') ? currentUserId : null,
         });
       }
 
@@ -9198,6 +9338,11 @@ async function recomputeDownstreamPaystubs(emp, editedPp, options = {}) {
       p.net_pay          = newNetPay;
       p.gross_plus_reimb = grossPlusReimb;
       p.edited_at        = nowIsoShort();
+      // [Tier4 C-5] Mirror last_edited_by + edit_count locally so the
+      // Activity Log built from STATE shows the right actor without
+      // waiting for a re-hydrate. DAL also writes these server-side.
+      p.last_edited_by   = (typeof currentUserId !== 'undefined') ? currentUserId : null;
+      p.edit_count       = (p.edit_count || 0) + 1;
 
       recomputed.push(p.pp);
     } catch (err) {
@@ -10046,10 +10191,21 @@ async function voidPaystub(employeeId, pp, btnEl) {
         // rather than silently diverging.
         throw new Error('This paystub has no cloud ID yet — cannot void. Try refreshing the page.');
       }
-      await DAL.voidPaystub(p.paystub_id);
+      // [Tier4 I-6] Pass voidedBy so the cloud row attributes the void to
+      // the signed-in admin. DB triggers may also set this from auth.uid()
+      // server-side; passing it explicitly is defense-in-depth so the
+      // Activity Log shows a real name instead of "(unknown user)" even
+      // if the trigger ever lapses.
+      await DAL.voidPaystub(p.paystub_id, {
+        voidedBy: (typeof currentUserId !== 'undefined') ? currentUserId : null,
+      });
     }
     p.voided = true;
     p.voided_at = nowIsoShort();
+    // [Tier4 I-6] Mirror voided_by locally so the in-memory Activity Log
+    // (buildActivityLog reads from STATE.employees[*].periods[*]) shows the
+    // correct actor without waiting for a re-hydrate.
+    p.voided_by = (typeof currentUserId !== 'undefined') ? currentUserId : null;
     saveState(STATE);
 
     // [VOID-CASCADE] Voiding a paystub changes the YTD basis for every
@@ -10131,6 +10287,11 @@ async function restorePaystub(employeeId, pp, btnEl) {
     }
     p.voided = false;
     delete p.voided_at;  // keep the object shape clean
+    // [Tier4 I-6] Clear voided_by locally too so the Activity Log doesn't
+    // claim a "voided by Chris" event after restore. The cloud DAL clears
+    // it server-side (restorePaystub sets all four voided_* fields to
+    // null/false — see DAL); mirror that locally.
+    delete p.voided_by;
     saveState(STATE);
 
     // [VOID-CASCADE] Restoring a paystub also changes downstream YTD basis
