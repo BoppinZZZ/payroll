@@ -13575,9 +13575,21 @@ async function hydrateAndRender() {
       console.warn('[hydrate] loadFromSupabase returned unexpected shape; keeping existing STATE.');
       return;
     }
-    // [Tier3 I-8] Verify the user hasn't changed since we started.
+    // [Tier3 I-8 fix] Bail only on a REAL identity change, not on the
+    // normal null → user-id transition that happens during a fresh
+    // sign-in (loadCurrentUserProfile runs in parallel and populates
+    // currentUserId while we're awaiting loadFromSupabase).
+    //
+    // The cases we care about:
+    //   null → null      — pre-auth race; nothing to compare. Allow.
+    //   null → <id>      — INITIAL SIGN-IN (loadCurrentUserProfile resolved
+    //                       while we were fetching). Allow.
+    //   <id> → null      — user signed out mid-hydrate. Bail.
+    //   <id> → <other>   — different user took over mid-hydrate. Bail.
+    //   <id> → <same>    — no change. Allow.
     const userAtHydrateEnd = (typeof currentUserId !== 'undefined') ? currentUserId : null;
-    if (userAtHydrateStart !== userAtHydrateEnd) {
+    const userChanged = userAtHydrateStart != null && userAtHydrateStart !== userAtHydrateEnd;
+    if (userChanged) {
       console.warn('[Tier3 I-8] hydrate aborted: user changed mid-hydrate (was ' + userAtHydrateStart + ', now ' + userAtHydrateEnd + '). Result discarded.');
       return;
     }
