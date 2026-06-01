@@ -11533,6 +11533,24 @@ window.addEventListener('unhandledrejection', (e) => {
 // console (e.g. `await DAL.getCompany()`) before being wired into the app
 // in Chunks 4e (reads) and 4f (writes).
 
+// [Tier5 Finding 7] Defense-in-depth guard for admin-only DAL writes.
+// RLS on the server is the actual security boundary, but adding a JS
+// check at the top of admin-only methods (a) gives a clearer error
+// message than the generic "RLS denied" round-trip, (b) catches
+// console-bypass attempts before they hit the network, and (c) matches
+// the requireAdmin() pattern already used by UI handlers. Throws on
+// failure so callers' try/catch surfaces the issue. Falls through
+// safely in dev mode (file://) where initCurrentUserProfile hardcodes
+// currentUserRole = 'admin'.
+function assertAdminForDAL(action) {
+  if (typeof currentUserRole !== 'undefined' && currentUserRole !== 'admin') {
+    const reason = currentUserRole == null
+      ? '(role not yet loaded — try refreshing the page)'
+      : `(current role: ${currentUserRole})`;
+    throw new Error(`Admin-only operation refused: ${action || 'DAL write'} ${reason}`);
+  }
+}
+
 const DAL = {
 
   // ---- 4d-1 ----------------------------------------------------------------
@@ -12540,6 +12558,7 @@ const DAL = {
   //
   // RLS: only admins can write to `companies` (enforced server-side).
   async saveCompany(input) {
+    assertAdminForDAL('saveCompany');
     const allowed = [
       'name', 'legal_name', 'ein', 'ca_employer_account',
       'street', 'city', 'state', 'zip', 'phone', 'email',
@@ -12597,6 +12616,7 @@ const DAL = {
   //
   // RLS: only admins can write to `tax_rates` (enforced server-side).
   async saveTaxRates(year, input) {
+    assertAdminForDAL('saveTaxRates');
     if (typeof year !== 'number' || !Number.isInteger(year)) {
       throw new Error('saveTaxRates: year must be an integer (e.g. 2026).');
     }
@@ -12666,6 +12686,7 @@ const DAL = {
   //
   // RLS: only admins can INSERT into `employees` (enforced server-side).
   async createEmployee(input) {
+    assertAdminForDAL('createEmployee');
     if (!input || typeof input !== 'object') {
       throw new Error('createEmployee: input object is required.');
     }
@@ -12719,6 +12740,7 @@ const DAL = {
   //
   // RLS: only admins can UPDATE employees (enforced server-side).
   async updateEmployee(id, input) {
+    assertAdminForDAL('updateEmployee');
     if (!id || typeof id !== 'string') {
       throw new Error('updateEmployee: id (uuid string) is required.');
     }
@@ -12790,6 +12812,7 @@ const DAL = {
   //
   // RLS: only admins can DELETE employees (enforced server-side).
   async deleteEmployee(id) {
+    assertAdminForDAL('deleteEmployee');
     if (!id || typeof id !== 'string') {
       throw new Error('deleteEmployee: id (uuid string) is required.');
     }
@@ -12843,6 +12866,7 @@ const DAL = {
   //
   // RLS: only admins can UPDATE paystubs (enforced server-side).
   async updatePaystub(id, input, opts = {}) {
+    assertAdminForDAL('updatePaystub');
     if (!id || typeof id !== 'string') {
       throw new Error('updatePaystub: id (uuid string) is required.');
     }
@@ -12914,6 +12938,7 @@ const DAL = {
   //
   // Throws if the paystub doesn't exist (id mismatch).
   async voidPaystub(id, opts = {}) {
+    assertAdminForDAL('voidPaystub');
     if (!id || typeof id !== 'string') {
       throw new Error('voidPaystub: id (uuid string) is required.');
     }
@@ -12946,6 +12971,7 @@ const DAL = {
   },
 
   async restorePaystub(id) {
+    assertAdminForDAL('restorePaystub');
     if (!id || typeof id !== 'string') {
       throw new Error('restorePaystub: id (uuid string) is required.');
     }
@@ -13005,6 +13031,7 @@ const DAL = {
   //
   // Returns the created row (including the generated uuid).
   async createPaystub(input) {
+    assertAdminForDAL('createPaystub');
     if (!input || typeof input !== 'object') {
       throw new Error('createPaystub: input object is required.');
     }
