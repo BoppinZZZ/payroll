@@ -1368,7 +1368,11 @@
       </div>
       <div class="emp-form-field">
         <label class="emp-form-label" for="paystub-edit-hours">Total Hours <span class="required">*</span></label>
-        <input type="number" id="paystub-edit-hours" class="emp-form-input" placeholder="80.00" min="0" step="0.01" />
+        <!-- [HRSNAP-2] step="any" allows the precise hours value (e.g. 13.0832
+             computed from clock_in/clock_out times) to pass browser validation.
+             The pre-existing JS validation in submitEditPaystub still enforces
+             "number >= 0" via Number() + isFinite() checks. -->
+        <input type="number" id="paystub-edit-hours" class="emp-form-input" placeholder="80.00" min="0" step="any" />
         <div class="emp-form-error" id="paystub-err-hours">Hours must be zero or greater.</div>
       </div>
       <div class="emp-form-field">
@@ -2744,7 +2748,7 @@ function renderDraftProgressWidget() {
           <div class="dpw-emp-name">
             <div class="avatar">${esc(emp.avatar)}</div>
             <div>
-              <div class="dpw-emp-label">${esc(emp.name)}</div>
+              <div class="dpw-emp-label">${esc(emp.name)}${!emp.profile_id ? ' <span class="badge" style="background:var(--border); color:var(--muted); font-size:10px; margin-left:6px;" title="This employee has not been linked to a sign-in account yet.">Not yet invited</span>' : ''}</div>
               <div class="dpw-emp-counts">Nothing entered yet</div>
             </div>
           </div>
@@ -2771,7 +2775,7 @@ function renderDraftProgressWidget() {
         <div class="dpw-emp-name">
           <div class="avatar">${esc(emp.avatar)}</div>
           <div>
-            <div class="dpw-emp-label">${esc(emp.name)}</div>
+            <div class="dpw-emp-label">${esc(emp.name)}${!emp.profile_id ? ' <span class="badge" style="background:var(--border); color:var(--muted); font-size:10px; margin-left:6px;" title="This employee has not been linked to a sign-in account yet.">Not yet invited</span>' : ''}</div>
             <div class="dpw-emp-counts">${countsText}</div>
           </div>
         </div>
@@ -3121,7 +3125,7 @@ function renderEmployees() {
         <td class="money">${money(emp.hourly_rate)}/hr</td>
         <td class="money">${money(t.gross)}</td>
         <td class="money">${last ? money(last.net_pay) : "—"}</td>
-        <td>${emp.active ? '<span class="badge active">Active</span>' : '<span class="badge pending">Inactive</span>'}</td>
+        <td>${emp.active ? '<span class="badge active">Active</span>' : '<span class="badge pending">Inactive</span>'}${emp.active && !emp.profile_id ? ' <span class="badge" style="background:var(--border); color:var(--muted); margin-left:6px;" title="This employee has not been linked to a sign-in account yet. Send them an invite when ready.">Not yet invited</span>' : ''}</td>
         <td style="text-align:right;"><div style="display:inline-flex; gap:6px;">${editBtn}${secondBtn}</div></td>
       </tr>`;
   }).join("");
@@ -6925,6 +6929,13 @@ function buildPeriodFromDraft(emp, entry) {
     pp: STATE.current_period.pp,
     end_date: STATE.current_period.end,
     total_hours: round2(sum.totalHours),
+    // [HRSNAP-1] Snapshot the employee's hourly rate at finalize time so
+    // future Edit Paystub operations can read the exact rate from the
+    // paystub row instead of inferring it from rounded gross/hours.
+    // Eliminates the 2-decimal-storage precision drift that surfaces when
+    // editing hours on a paystub whose original hours sum was non-clean
+    // (e.g., 13.0832 from clock-in/out math).
+    hourly_rate: emp.hourly_rate,
     gross_pay,
     mileage_miles,
     mileage_dollars,
@@ -7324,6 +7335,8 @@ async function finalizePP(employeeId, btnEl) {
         employee_id:           emp.id,
         pay_period_id:         STATE.current_period.pay_period_id,
         hours:                 period.total_hours,
+        // [HRSNAP-1] Persist the rate snapshot taken in buildPeriodFromDraft.
+        hourly_rate:           period.hourly_rate,
         gross:                 period.gross_pay,
         mileage_miles:         period.mileage_miles,
         mileage_amount:        period.mileage_dollars,
@@ -9140,7 +9153,7 @@ function printDepositSummary() {
 // Null at all other times.
 let paystubEditingContext = null;
 
-function openEditPaystubModal(employeeId, pp) {
+async function openEditPaystubModal(employeeId, pp) {
   if (!requireAdmin('Edit Paystub')) return;
 
   const emp = STATE.employees.find(e => e.id === employeeId);
@@ -9151,8 +9164,14 @@ function openEditPaystubModal(employeeId, pp) {
 
   paystubEditingContext = { employeeId, pp };
 
-  // Prefill the three fields from the paystub's current values
-  document.getElementById("paystub-edit-hours").value = (p.total_hours != null) ? String(p.total_hours) : "";
+  // Prefill the three fields from the paystub's current values.
+  // Hours starts at the rounded stored value; we upgrade to the precise
+  // time_entries sum below (asynchronously). Miles and reimb stay as the
+  // stored values — they have no underlying detail rows to recover precision
+  // from. (Miles are precise to 2 decimals from the mileage input UI; reimb
+  // is just a typed dollar amount.)
+  const hoursInput = document.getElementById("paystub-edit-hours");
+  if (hoursInput) hoursInput.value = (p.total_hours != null) ? String(p.total_hours) : "";
   document.getElementById("paystub-edit-miles").value = (p.mileage_miles != null) ? String(p.mileage_miles) : "";
   document.getElementById("paystub-edit-reimb").value = (p.reimbursement != null) ? String(p.reimbursement) : "";
 
@@ -9170,12 +9189,61 @@ function openEditPaystubModal(employeeId, pp) {
   const btn = document.getElementById("paystub-edit-submit");
   if (btn) { btn.disabled = false; btn.textContent = "Save Changes"; }
 
-  // Show modal and focus the hours field for quick editing
+  // Show modal immediately so the user sees it pop. The precise-hours upgrade
+  // happens after the fetch resolves (typically <200ms).
   document.getElementById("paystub-edit-modal").style.display = "flex";
   setTimeout(() => {
     const h = document.getElementById("paystub-edit-hours");
     if (h) { h.focus(); h.select(); }
   }, 50);
+
+  // [HRSNAP-2] Upgrade the Hours field to the precise time_entries sum.
+  // Background: paystubs.hours is numeric(6,2), so finalizing a timesheet
+  // with non-clean precise hours (e.g., 13.0832 from clock_in/out math)
+  // rounds to 13.08 on storage. Editing later then uses 13.08, which when
+  // multiplied by the rate gives ~8 cents less than the original gross.
+  // Recomputing hoursFromClocks across the underlying time_entries recovers
+  // the precise value, so saving the modal without re-typing hours produces
+  // gross = precise_hours × rate that matches the original paystub exactly.
+  //
+  // We snapshot the editing context at the time the fetch was kicked off so
+  // that if the user closes the modal and opens a different paystub before
+  // this fetch resolves, we don't clobber the new modal's value.
+  const fetchToken = paystubEditingContext;  // closure capture
+  try {
+    if (!p.timesheet_id) return;  // pre-HRSNAP-2 paystubs may not have it; fall back silently
+    const entries = await DAL.getTimeEntriesForTimesheet(p.timesheet_id);
+    if (!entries || entries.length === 0) return;  // No detail rows; keep rounded fallback
+
+    // Recompute precise total via the same function buildPeriodFromDraft uses
+    // (hoursFromClocks → diff/60 in JS double precision).
+    let preciseHours = 0;
+    for (const te of entries) {
+      preciseHours += hoursFromClocks(te.clock_in, te.clock_out);
+    }
+    if (!isFinite(preciseHours) || preciseHours <= 0) return;  // Bad data; keep fallback
+
+    // Bail if the user already closed/switched modals while we were fetching.
+    if (paystubEditingContext !== fetchToken) return;
+
+    // Bail if the user already started typing in the hours field — don't
+    // overwrite their input. document.activeElement check covers the focus
+    // case from setTimeout above; we also check if the value differs from
+    // what we initially prefilled (meaning user edited it).
+    const h2 = document.getElementById("paystub-edit-hours");
+    if (!h2) return;
+    const initialPrefill = (p.total_hours != null) ? String(p.total_hours) : "";
+    if (h2.value !== initialPrefill) return;  // User edited; respect that
+
+    // Round to 4 decimals — eliminates float noise like 13.083333333333334
+    // while preserving the meaningful precision that drove the original gross.
+    const preciseRounded = Math.round(preciseHours * 10000) / 10000;
+    h2.value = String(preciseRounded);
+    // Re-select so Tab / typing replaces the value naturally.
+    if (document.activeElement === h2) h2.select();
+  } catch (err) {
+    console.warn('[HRSNAP-2] precise-hours upgrade failed; keeping rounded fallback:', err);
+  }
 }
 
 function closeEditPaystubModal() {
@@ -9390,22 +9458,29 @@ async function submitEditPaystub() {
   if (!valid) return;
 
   // --- Recompute paystub using the same tax engine buildPeriodFromDraft uses ---
-  // [Tier2 I-2] Derive the hourly rate from the paystub's original
-  // gross / hours instead of using emp.hourly_rate. The previous behavior
-  // silently applied the CURRENT rate to a historical edit — so if Anna
-  // raised Annie's rate from $20 to $25 and then later fixed a typo on
-  // a Q1 paystub, the gross would jump by 25%. That gross change also
-  // poisoned every downstream paystub's YTD-cap math (via the cascade
-  // recompute, which uses the new gross).
+  // [HRSNAP-1] Read the rate from the paystub's hourly_rate snapshot column.
+  // Set at finalize time by buildPeriodFromDraft, so this is the EXACT rate
+  // used to compute the original gross — no rounding error from inferring
+  // it via gross/hours.
   //
-  // gross / hours recovers the rate that was effective at finalize time
-  // without needing a new schema column. Falls back to emp.hourly_rate
-  // only for $0/0hr paystubs where the snapshot isn't recoverable.
+  // Fallback chain for legacy paystubs that pre-date the snapshot column:
+  //   1. p.hourly_rate (set by HRSNAP-1) — exact
+  //   2. oldGross/oldHours (Tier2 I-2 legacy) — close but rounds on numeric(6,2)
+  //   3. emp.hourly_rate — only used when neither snapshot nor old data exist
+  //
+  // Tier2 I-2 intent preserved: paystubs finalized BEFORE this change keep
+  // their inferred-from-gross/hours behavior on edit. New paystubs (and
+  // backfilled historical ones via the migration) use the exact snapshot.
   const oldGross = Number(p.gross_pay) || 0;
   const oldHours = Number(p.total_hours) || 0;
-  const snapshotRate = (oldHours > 0)
-    ? (oldGross / oldHours)
-    : (emp.hourly_rate || 0);
+  let snapshotRate;
+  if (p.hourly_rate != null && Number.isFinite(Number(p.hourly_rate)) && Number(p.hourly_rate) > 0) {
+    snapshotRate = Number(p.hourly_rate);
+  } else if (oldHours > 0) {
+    snapshotRate = oldGross / oldHours;
+  } else {
+    snapshotRate = emp.hourly_rate || 0;
+  }
   const newGross = round2(hoursNum * snapshotRate);
   const mileage_miles   = round2(milesNum);
   // [MR-1] Use the mileage rate from this paystub's calendar year (derived
@@ -11771,7 +11846,7 @@ const DAL = {
       .from('paystubs')
       .select(`
         id, timesheet_id, employee_id, pay_period_id,
-        hours, mileage_miles, mileage_amount, reimbursement_amount, gross,
+        hours, hourly_rate, mileage_miles, mileage_amount, reimbursement_amount, gross,
         fit, ss_ee, medicare_ee, addl_medicare, ca_pit, sdi,
         net_pay,
         ss_er, medicare_er, suta, ett, futa,
@@ -11859,6 +11934,41 @@ const DAL = {
       mileageEntries: meRes.data || [],
       reimbursements: reRes.data || [],
     };
+  },
+
+
+  // ---- [HRSNAP-2] READER: getTimeEntriesForTimesheet ----------------------
+  // Fetch the clock_in / clock_out rows for one specific timesheet. Used by
+  // openEditPaystubModal to recompute the precise hours total from individual
+  // shift times, so the modal can prefill with 4-decimal precision (e.g.,
+  // 13.0832 hours) instead of the rounded numeric(6,2) value stored on the
+  // paystub (13.08). Saves the user from re-typing precise hours and
+  // eliminates the 8-cent-ish drift on hours edits.
+  //
+  // Returns an array of plain row objects (may be empty if no entries exist
+  // for this timesheet, in which case the caller falls back to the stored
+  // paystub.total_hours). Errors are logged to console and return [] so the
+  // modal still opens with the rounded fallback value — never let this break
+  // the Edit flow.
+  //
+  // RLS: admin sees all; employees see only entries on their own timesheets
+  // (existing time_entries_access policy).
+  async getTimeEntriesForTimesheet(timesheetId) {
+    if (!timesheetId || typeof timesheetId !== 'string') return [];
+    try {
+      const { data, error } = await supabaseClient
+        .from('time_entries')
+        .select('clock_in, clock_out')
+        .eq('timesheet_id', timesheetId);
+      if (error) {
+        console.warn('DAL.getTimeEntriesForTimesheet error:', error);
+        return [];
+      }
+      return data || [];
+    } catch (err) {
+      console.warn('DAL.getTimeEntriesForTimesheet threw:', err);
+      return [];
+    }
   },
 
 
@@ -12337,9 +12447,19 @@ const DAL = {
           // [4f-5] Carry the Supabase paystub UUID through so void/restore/edit
           // handlers can target the exact row. Not rendered anywhere in the UI.
           paystub_id:        ps.id,
+          // [HRSNAP-2] Carry the timesheet UUID through so openEditPaystubModal
+          // can look up the underlying time_entries and prefill the hours field
+          // with the precise sum (vs the rounded numeric(6,2) stored value).
+          // Eliminates the rounded-display drift on hours edits.
+          timesheet_id:      ps.timesheet_id || null,
           pp:                ps.pay_period ? ps.pay_period.pp_number : null,
           end_date:          ps.pay_period ? ps.pay_period.end_date  : null,
           total_hours:       N(ps.hours),
+          // [HRSNAP-1] Carry the rate snapshot through to STATE. Read by
+          // submitEditPaystub when computing a new gross. May be null on
+          // very old rows that predate the migration (those fall back to
+          // the legacy snapshot-rate inference in submitEditPaystub).
+          hourly_rate:       ps.hourly_rate != null ? N(ps.hourly_rate) : null,
           gross_pay:         grossPay,
           mileage_miles:     N(ps.mileage_miles),
           mileage_dollars:   mileageDollars,
@@ -12880,6 +13000,11 @@ const DAL = {
       'fit', 'ss_ee', 'medicare_ee', 'addl_medicare', 'ca_pit', 'sdi',
       'net_pay',
       'ss_er', 'medicare_er', 'suta', 'ett', 'futa',
+      // [HRSNAP-1] Allow updates to the hourly_rate snapshot. Edit Paystub
+      // doesn't currently change the rate (only hours/miles/reimb), but
+      // listing it here means a future "fix a wrong rate" workflow can
+      // update it without touching the DAL again.
+      'hourly_rate',
     ];
 
     // Build the row from only numeric fields present in `input`.
@@ -13075,6 +13200,11 @@ const DAL = {
       pay_period_id:  input.pay_period_id,
       timesheet_id:   input.timesheet_id || null,
       hours:                 Number(input.hours                 || 0),
+      // [HRSNAP-1] Hourly rate snapshot. Nullable so the column gracefully
+      // handles legacy callers that don't supply it (those rows backfill
+      // via the migration). Future inserts from buildPeriodFromDraft always
+      // provide a real value.
+      hourly_rate:           input.hourly_rate != null ? Number(input.hourly_rate) : null,
       mileage_miles:         Number(input.mileage_miles         || 0),
       mileage_amount:        Number(input.mileage_amount        || 0),
       reimbursement_amount:  Number(input.reimbursement_amount  || 0),
