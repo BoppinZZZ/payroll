@@ -5342,6 +5342,17 @@ async function runDraftSyncLoop(employeeId, s) {
 // ----------------------------------------------------------------------------
 const draftAutoSaveTimers = new Map();   // employeeId -> setTimeout id
 
+// [ADMIN-SYNC-FIX] Per-tab set of employee IDs whose entries this tab has
+// actively typed for in this session. Used by syncDraftToCloud to relax the
+// EMERGENCY-FIX block so admins can enter time on another employee's behalf,
+// while still preventing the original destructive scenario (stale admin tab
+// auto-syncing yesterday's data over today's fresh cloud data).
+//
+// Populated only by scheduleDraftSync (called from every user input handler,
+// never from hydrate). Cleared on page refresh — stays in memory only, never
+// persisted. A tab that hasn't typed for someone can't sync their data.
+const tabSyncWhitelist = new Set();      // employeeIds typed for in this tab
+
 // [FINALIZE-RACE] Module flag that is true while finalizePP is mid-flight.
 // Blocks draft mutators (so typing can't diverge the paystub from the
 // timesheet's child rows) and tells the visibilitychange handler not to
@@ -5450,6 +5461,13 @@ window.addEventListener('storage', (e) => {
 function scheduleDraftSync(employeeId, delayMs = 0) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: no cloud sync
+
+  // [ADMIN-SYNC-FIX] Mark this tab as having actively typed for this employee.
+  // Signals to syncDraftToCloud that the in-memory data is fresh user input
+  // (not stale STATE from a previous session). Every call site of
+  // scheduleDraftSync is a user input handler — no hydrate or system code
+  // calls this — so adding to the whitelist here is always intentional.
+  tabSyncWhitelist.add(employeeId);
 
   // [LF-1] Don't set 'unsaved' status — saveState already wrote the data
   // to localStorage (the local source of truth). Cloud sync runs invisibly.
@@ -5669,19 +5687,31 @@ async function syncDraftToCloud(employeeId, signal) {
   if (!employeeId) return;
   if (window.location.protocol === 'file:') return;  // Dev mode: local-only
 
-  // [EMERGENCY-FIX] Sync can ONLY push the current user's own draft.
-  // An admin viewing another employee's data must NEVER push back — that
-  // turns a stale view into a destructive wipe of cloud data (which is
-  // exactly what happened on 2026-05-29 when Annie's 7 reimbursement rows
-  // got wiped by Chris's admin-side hydrate triggering a sync). Sync only
-  // proceeds if the requested employeeId matches the signed-in user's
-  // linked employee record. If findOwnEmployee returns null (e.g. admin
-  // hasn't been linked to an employee row), we block ALL sync — that's
-  // the safe failure mode because we'd rather skip a sync than corrupt
-  // cloud data.
+  // [EMERGENCY-FIX] + [ADMIN-SYNC-FIX] Sync gating for cross-employee writes.
+  //
+  // Original EMERGENCY-FIX (2026-05-29): admin viewing another employee's
+  // STATE could push their stale data on top of fresh cloud data and wipe
+  // it (which is what happened to Annie's 7 reimbursement rows). The fix
+  // blocked ALL cross-employee sync from admin.
+  //
+  // ADMIN-SYNC-FIX (refinement): blocking ALL cross-employee sync broke
+  // the legitimate workflow of an admin entering time on someone else's
+  // behalf. We now allow cross-employee sync ONLY when this tab has
+  // actively typed for that employee in the current session (tracked via
+  // tabSyncWhitelist, populated by scheduleDraftSync — the funnel point
+  // for every user input handler). A tab that hasn't typed for an employee
+  // cannot sync that employee's data, which preserves the original safety
+  // guarantee: stale STATE that was loaded from a prior session has no
+  // whitelist entry, so it cannot wipe cloud.
+  //
+  // If findOwnEmployee returns null (admin hasn't been linked to an
+  // employee row), the own-sync path is impossible — admin must rely on
+  // the whitelist path.
   const ownEmp = (typeof findOwnEmployee === 'function') ? findOwnEmployee() : null;
-  if (!ownEmp || ownEmp.id !== employeeId) {
-    console.warn('[EMERGENCY-FIX] sync blocked: only the signed-in user can sync their own draft. requested empId=' + employeeId + ', own empId=' + (ownEmp && ownEmp.id));
+  const isOwnSync = !!(ownEmp && ownEmp.id === employeeId);
+  const isWhitelistedAdminSync = currentUserRole === 'admin' && tabSyncWhitelist.has(employeeId);
+  if (!isOwnSync && !isWhitelistedAdminSync) {
+    console.warn('[EMERGENCY-FIX] sync blocked: not the signed-in user\'s own draft and admin has not typed for this employee in this tab. requested empId=' + employeeId + ', own empId=' + (ownEmp && ownEmp.id) + ', role=' + currentUserRole + ', whitelisted=' + tabSyncWhitelist.has(employeeId));
     return;
   }
 
@@ -7474,10 +7504,35 @@ function computeNextPeriod(curr) {
 // for the current period. Returns false if there are no employees (so rollover
 // never happens on an empty roster). Voided paystubs are treated as not-finalized
 // so you can void + re-finalize a period without prematurely advancing to the next.
+//
+// [RF-1] Skip employees whose created_at is AFTER the current period's end_date.
+// These are mid-period new hires — they couldn't possibly have worked during the
+// period that already ended, so requiring a paystub for them would block the
+// auto-rollover indefinitely. Established employees (created on or before the
+// period end) still must be finalized.
+//
+// Legacy rows that lack a created_at field (none currently exist, but defensive
+// for any DB rows that pre-date the [RF-1] addition to the SELECT clause) are
+// treated as "old enough" and included in the check, preserving the previous
+// behavior for that case.
 function allEmployeesFinalizedForCurrentPP() {
   const pp = STATE.current_period.pp;
   if (STATE.employees.length === 0) return false;
-  return STATE.employees.every(emp =>
+
+  const periodEndCutoff = new Date(STATE.current_period.end + 'T23:59:59');
+  const relevantEmps = STATE.employees.filter(emp => {
+    if (!emp.created_at) return true;  // Legacy rows — preserve old behavior
+    const createdAtMs = new Date(emp.created_at).getTime();
+    if (!Number.isFinite(createdAtMs)) return true;  // Unparseable — be safe, include
+    return createdAtMs <= periodEndCutoff.getTime();
+  });
+
+  // If filtering left us with zero established employees (only new hires exist),
+  // there's nothing to wait on — but also nothing to finalize, so don't roll over.
+  // This mirrors the empty-roster guard above.
+  if (relevantEmps.length === 0) return false;
+
+  return relevantEmps.every(emp =>
     emp.periods.some(p => p.pp === pp && isPaystubActive(p))
   );
 }
@@ -11761,9 +11816,12 @@ const DAL = {
   //   //      { employee_id: "E-002", name: "Annie Cheng", ... } ]
   async getEmployees() {
     // [WG-2] street/city/state/zip pulled for W-2 mailing address.
+    // [RF-1] created_at pulled so allEmployeesFinalizedForCurrentPP can
+    // skip employees added AFTER the current period ended (otherwise a
+    // mid-period new hire would block the auto-rollover indefinitely).
     const { data, error } = await supabaseClient
       .from('employees')
-      .select('id, profile_id, employee_id, name, title, hourly_rate, avatar, active, street, city, state, zip')
+      .select('id, profile_id, employee_id, name, title, hourly_rate, avatar, active, street, city, state, zip, created_at')
       .order('employee_id', { ascending: true });
 
     if (error) {
@@ -12531,6 +12589,9 @@ const DAL = {
         city:        emp.city        || '',
         state:       emp.state       || '',
         zip:         emp.zip         || '',
+        // [RF-1] Carry through so allEmployeesFinalizedForCurrentPP can skip
+        // mid-period new hires when deciding whether to auto-advance.
+        created_at:  emp.created_at  || null,
         periods:     periods,
       };
     });
