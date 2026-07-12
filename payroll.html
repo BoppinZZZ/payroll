@@ -2826,6 +2826,57 @@ function findOwnEmployee() {
   return matches[0] || null;
 }
 
+// [DEADLINE-1] Amber banner reminding the signed-in user that the current
+// pay period is ending soon. Shows on both admin and employee dashboards
+// when the period end is within 3 days (inclusive of "today", exclusive of
+// "already past"). Returns empty string when no banner should show — so
+// callers can safely interpolate ${renderDeadlineReminderBanner()} without
+// wrapping in a conditional.
+//
+// Design decisions:
+//   * 3-day window matches the notification preference set by the admin.
+//   * "today" / "tomorrow" / "in N days" phrasing reads more naturally
+//     than "in 0 days" / "in 1 day".
+//   * Hidden entirely when the period end has already passed — at that
+//     point the period is finalize-eligible and the message would be stale.
+//   * Uses inline styles (rather than a new CSS class) so this is fully
+//     self-contained and easy to remove if we later replace with a proper
+//     scheduled email reminder.
+function renderDeadlineReminderBanner() {
+  const cp = STATE.current_period;
+  if (!cp || !cp.end) return '';
+
+  // Compute whole days between today (local midnight) and the period end
+  // (also parsed as local midnight, to avoid timezone drift from ISO 'Z').
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const endDate = new Date(cp.end + 'T00:00:00');
+  if (!Number.isFinite(endDate.getTime())) return '';  // Malformed end date — skip silently
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysUntilEnd = Math.round((endDate.getTime() - today.getTime()) / msPerDay);
+
+  // Show only in the 3-day window leading up to (and including) period end.
+  if (daysUntilEnd < 0 || daysUntilEnd > 3) return '';
+
+  const daysText = daysUntilEnd === 0 ? 'today'
+                 : daysUntilEnd === 1 ? 'tomorrow'
+                 : `in ${daysUntilEnd} days`;
+
+  return `
+    <div style="background:#fef3c7; border:1px solid #fbbf24; border-radius:8px; padding:16px 20px; margin-bottom:20px; display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+      <div style="flex:1; min-width:280px;">
+        <div style="font-weight:600; color:#92400e; font-size:15px; margin-bottom:4px;">
+          Time entries due ${daysText}
+        </div>
+        <div style="font-size:13px; color:#78350f;">
+          Pay period PP${cp.pp} ends ${formatDate(cp.end)}. Make sure your time entries are complete before then.
+        </div>
+      </div>
+      <button class="btn primary" onclick="showView('run-payroll')" style="flex-shrink:0;">Go to Run Payroll →</button>
+    </div>
+  `;
+}
+
 function renderDashboard() {
   // [E-2] Dispatcher: employees get a scoped dashboard showing only their
   // own numbers; admins get the full firm-wide view below.
@@ -2904,6 +2955,7 @@ function renderDashboard() {
       </div>
     </div>
 
+    ${renderDeadlineReminderBanner()}
     ${renderCurrentPeriodWidget()}
     ${renderDraftProgressWidget()}
 
@@ -3062,6 +3114,7 @@ function renderEmployeeDashboard() {
       <button class="btn primary" onclick="showView('run-payroll')" title="Enter hours for the current pay period">+ Run Payroll</button>
     </div>
 
+    ${renderDeadlineReminderBanner()}
     ${currentPeriodCard}
 
     <div class="stats-grid">
