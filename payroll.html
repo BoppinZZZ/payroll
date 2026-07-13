@@ -2926,9 +2926,33 @@ function renderDashboard() {
   // YTD by employee table rows
   // [Tier2 C-1] Filter to current calendar year — the column is "YTD" not "Lifetime".
   // Also makes the SUTA $7K cap check accurate (cap resets every Jan 1).
+  //
+  // [Batch2-2B] Three-state cap indicator: reached / approaching / accruing.
+  // The "approaching" band triggers at 90% of the cap so admin gets ~1-2
+  // paystubs of heads-up before the cap crosses, which lets them plan around
+  // the resulting drop in employer taxes (SUTA/ETT/FUTA all zero once cap
+  // is reached — that changes the tax-deposit math). Threshold is expressed
+  // as a decimal so it reads clearly at the callsite; 0.9 = 90% = $6,300
+  // for the standard $7,000 cap.
+  // [Batch2-2B] Fallback to 7000 for consistency with the other cap-accessor
+  // callsites (lines ~3591, ~4480, ~2366). In practice tax_rates is seeded
+  // with 7000 at INITIAL_DATA (line ~1493), so this is defense in depth
+  // against a hypothetical "tax rates not yet loaded" first-render race.
+  const capBase = (STATE.tax_rates && STATE.tax_rates.state_unemployment_wage_base) || 7000;
+  const capApproachingThreshold = capBase * 0.9;
   const ytdRows = STATE.employees.map(emp => {
     const t = ytdTotalsForYear(emp, currentYearForYtd);
-    const capReached = t.gross >= STATE.tax_rates.state_unemployment_wage_base;
+    const capReached     = t.gross >= capBase;
+    const capApproaching = !capReached && t.gross >= capApproachingThreshold;
+    let capBadge;
+    if (capReached) {
+      capBadge = '<span class="badge pending">$7k cap reached</span>';
+    } else if (capApproaching) {
+      const remaining = capBase - t.gross;
+      capBadge = `<span class="badge pending" title="Employer SUTA/ETT/FUTA taxes will stop once this employee crosses $${capBase.toLocaleString()} YTD gross.">Approaching cap — ${money(remaining)} to go</span>`;
+    } else {
+      capBadge = '<span class="badge active">Still accruing</span>';
+    }
     return `
       <tr>
         <td>${renderEmployeeCell(emp)}</td>
@@ -2936,7 +2960,7 @@ function renderDashboard() {
         <td class="money">${money(t.gross)}</td>
         <td class="money">${money(t.reimb)}</td>
         <td class="money" style="color:var(--green);">${money(t.net)}</td>
-        <td>${capReached ? '<span class="badge pending">$7k cap reached</span>' : '<span class="badge active">Still accruing</span>'}</td>
+        <td>${capBadge}</td>
       </tr>`;
   }).join("");
 
@@ -10794,7 +10818,7 @@ function handleEmpNameInput() {
 //   null  → createEmployeeFromForm (Add mode)
 //   <id>  → applyEmployeeEdit (Edit mode)
 // Validation is the same in both modes; the dispatcher lives here to avoid duplication.
-function submitEmployeeModal() {
+async function submitEmployeeModal() {
   if (!requireAdmin('Save Employee')) return;
 
   // Read and trim all inputs
@@ -10884,6 +10908,60 @@ function submitEmployeeModal() {
   if (empModalEditingId === null) {
     // Add mode also needs the Active checkbox value
     fields.active = document.getElementById("emp-form-active").checked;
+
+    // [Batch2-2A] Duplicate name check — if there's already an employee with
+    // this exact name (active OR inactive), offer to reactivate that record
+    // instead of creating a duplicate row. This is the exact scenario that
+    // produced the Josh E-003/E-004 duplicate on 2026-06-30 — one row was
+    // inactive and hidden from the Employees list, so admin didn't realize
+    // it existed and added a fresh row.
+    //
+    // "Add anyway" is still available (Cancel button) so admins can add
+    // two people with the same name when it's genuinely legitimate.
+    //
+    // Case-insensitive compare with trimming. Match on name only for now —
+    // email match would ALSO be useful but requires a DAL round-trip to
+    // check auth.users; leave that for a follow-up if this is insufficient.
+    const nameLower = nameRaw.toLowerCase();
+    const duplicate = STATE.employees.find(e =>
+      e.name && e.name.trim().toLowerCase() === nameLower
+    );
+    if (duplicate) {
+      const statusLabel = duplicate.active ? 'active' : 'inactive';
+      const codeLabel   = duplicate.employee_id ? `, code ${duplicate.employee_id}` : '';
+      const msg =
+        `There's already an employee named "${duplicate.name}" (${statusLabel}${codeLabel}).\n\n` +
+        `Click OK to keep the existing record — reactivating it if needed. Nothing you just typed will be applied; use Edit Employee afterward if you need to update the record.\n\n` +
+        `Click Cancel to add "${nameRaw}" as a NEW employee anyway (both will exist with the same name).`;
+      if (confirm(msg)) {
+        closeAddEmployeeModal();
+        if (duplicate.active) {
+          showToast(`${duplicate.name} is already active — no change made.`, 'info');
+          return;
+        }
+        // Inline reactivation to avoid the double-confirm that
+        // reactivateEmployee() shows. Mirrors that function's cloud-first,
+        // then-STATE pattern so a failed cloud write doesn't leave STATE
+        // out of sync with the DB.
+        const isDevMode = window.location.protocol === 'file:';
+        try {
+          if (!isDevMode) {
+            await DAL.updateEmployee(duplicate.id, { active: true });
+          }
+          duplicate.active = true;
+          saveState(STATE);
+          showView("employees");
+          showToast(`${duplicate.name} reactivated.`, 'success');
+        } catch (err) {
+          console.error('[Batch2-2A] reactivate failed:', err);
+          showToast('Could not reactivate ' + duplicate.name + ' — ' + (err.message || 'unknown error') + '.', 'error');
+        }
+        return;
+      }
+      // User chose Cancel on the confirm → they explicitly want a duplicate.
+      // Fall through to the normal Add flow below.
+    }
+
     createEmployeeFromForm(fields);
   } else {
     applyEmployeeEdit(empModalEditingId, fields);
