@@ -9,6 +9,11 @@
      ~100KB. Loaded from the same CDN as supabase-js for consistency. Exposes
      window.jspdf.jsPDF once ready. -->
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<!-- [Batch3-9D] SheetJS (xlsx) — used by downloadFilingPacketXlsx() to build
+     a multi-sheet Excel workbook (Cover, DE 9, DE 9C, Form 941) for
+     quarterly tax filing. ~200KB. Exposes window.XLSX once ready. Loaded
+     from the same CDN as the other libs. -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <!-- [R-2] IBM Plex font family — Serif for headings, Sans for body/UI, Mono
      for tax IDs and other identifiers. Loaded from Google Fonts with preconnect
      hints so the FOUT (flash of unstyled text) is minimized. -->
@@ -3842,7 +3847,12 @@ function renderTaxFilings() {
         <!-- [Batch3-9C] DE 9C CSV export — CA EDD per-employee wage detail.
              SSN column is blank in the output; admin fills in before uploading
              to CA EDD e-Services. Every other field is pre-computed. -->
-        <button class="btn admin-only" onclick="downloadDE9CCsv(${selected.year}, ${selected.quarter})" title="Download the CA EDD DE 9C per-employee detail as a CSV file. SSN column will be blank — fill in manually before uploading to EDD e-Services.">Download DE 9C</button>
+        <button class="btn admin-only" onclick="downloadDE9CCsv(${selected.year}, ${selected.quarter})" title="Download a reference CSV with each employee's DE 9C wage detail. Open in Excel next to the CA EDD e-Services portal — you'll type the numbers in manually. Not a direct upload file (EDD only accepts ICESA/MMREF/XML for bulk).">Download DE 9C reference</button>
+        <!-- [Batch3-9D] Multi-sheet filing packet — one .xlsx with a cover
+             sheet, Form 941 lines, DE 9 lines, and DE 9C per-employee rows.
+             Turns filing from "reference multiple tabs" into "open one file,
+             transcribe each sheet into its portal." -->
+        <button class="btn primary admin-only" onclick="downloadFilingPacketXlsx(${selected.year}, ${selected.quarter})" title="Download a single Excel file with 4 sheets (Cover + Form 941 + DE 9 + DE 9C). Each sheet is a fill-in-the-blanks guide for that form's filing portal.">Download filing packet (.xlsx)</button>
       </div>
     </div>
 
@@ -8107,6 +8117,184 @@ function downloadDE9CCsv(year, quarter) {
   }
 
   downloadCsv(`annalee-de9c-${year}-Q${quarter}.csv`, headers, rows);
+}
+
+
+// [Batch3-9D] Multi-sheet XLSX filing packet — everything an admin needs to
+// transcribe onto CA EDD DE 9, DE 9C, and IRS Form 941 for a given quarter,
+// in one .xlsx file with a cover sheet.
+//
+// Uses SheetJS (window.XLSX, loaded via CDN in the HTML head). Each sheet is
+// built from a simple array-of-arrays; SheetJS handles all the OOXML/zip
+// details. Column widths are set so the file opens readable in Excel /
+// Google Sheets / Numbers without needing manual column-drag adjustments.
+//
+// The numbers come from the SAME helpers that render the on-screen Tax
+// Filings page (quarterlyBusinessTotals, quarterlyEmployeeSummary,
+// form941Line1) — no recomputation, no divergence risk.
+function downloadFilingPacketXlsx(year, quarter) {
+  if (!requireAdmin('Export Filing Packet')) return;
+  if (typeof XLSX === 'undefined' || !XLSX.utils) {
+    showToast('Excel library not loaded yet — try again in a few seconds, or refresh.', 'error');
+    return;
+  }
+
+  const company = STATE.company || {};
+  const r = STATE.tax_rates || {};
+  const t = quarterlyBusinessTotals(year, quarter);
+
+  if (t.employee_count === 0) {
+    showToast(`No paystubs found for Q${quarter} ${year}.`, 'info');
+    return;
+  }
+
+  const quarterRange = { 1: 'January 1 – March 31', 2: 'April 1 – June 30', 3: 'July 1 – September 30', 4: 'October 1 – December 31' }[quarter];
+  const dueDates = { 1: `April 30, ${year}`, 2: `July 31, ${year}`, 3: `October 31, ${year}`, 4: `January 31, ${year + 1}` };
+  const deadline = dueDates[quarter];
+  const $ = v => (v == null ? '0.00' : Number(v).toFixed(2));
+  const middleMonthName = { 1: 'March', 2: 'June', 3: 'September', 4: 'December' }[quarter];
+
+  // -------- Cover sheet --------
+  const cover = [
+    [`Q${quarter} ${year} Filing Packet`],
+    [],
+    ['Company', company.name || ''],
+    ['EIN', company.ein || '(not set)'],
+    ['CA Employer Account #', company.ca_employer_account || '(not set)'],
+    ['Quarter', `Q${quarter} ${year} · ${quarterRange}`],
+    ['Filing deadline', deadline],
+    [],
+    ['Filing checklist'],
+    [],
+    ['#', 'Task', 'Where to file', 'Reference sheet in this file'],
+    [1, 'Form 941 — Federal quarterly return', 'IRS e-file (via tax software or IRS Free File)', 'Sheet "Form 941"'],
+    [2, 'DE 9 — CA quarterly aggregate return', 'https://eddservices.edd.ca.gov/tap/secure/eservices', 'Sheet "DE 9"'],
+    [3, 'DE 9C — CA per-employee wage detail', 'Same portal — appears right after DE 9 in the same flow', 'Sheet "DE 9C"'],
+    [],
+    ['After filing'],
+    ['• Save the confirmation numbers from both portals (IRS + CA EDD).'],
+    ['• Archive this .xlsx file with your tax records.'],
+    ['• Also archive annalee-payroll-quarterly-' + year + '-Q' + quarter + '.csv (Tax Filings → Download CSV) as your line-item audit trail.'],
+  ];
+
+  // -------- DE 9 sheet --------
+  const uiTaxable = t.suta_taxable;
+  const de9Total = round2(t.suta + t.ett + t.ca_sdi + t.pit);
+  const de9 = [
+    ['CA EDD DE 9 — Quarterly Contribution Return'],
+    [],
+    ['Portal', 'https://eddservices.edd.ca.gov/tap/secure/eservices'],
+    ['Deadline', deadline],
+    ['Instructions', 'Log in → File a Return → select ' + `Q${quarter} ${year}` + ' → DE 9. Type each Value below into the matching field on the portal.'],
+    [],
+    ['Field', 'Value', 'Notes'],
+    ['CA Employer Account #', company.ca_employer_account || '(not set)', 'From your CA EDD enrollment letter'],
+    ['Quarter', `Q${quarter} ${year}`, quarterRange],
+    ['Line A · UI Taxable wages', $(uiTaxable), '$7,000 YTD cap per employee'],
+    ['Line A · UI Contribution', $(t.suta), `UI rate ${(r.suta * 100).toFixed(1)}%`],
+    ['Line B · ETT Taxable wages', $(uiTaxable), 'Same $7,000 base as UI'],
+    ['Line B · ETT Contribution', $(t.ett), `ETT rate ${(r.ett * 100).toFixed(1)}%`],
+    ['Line C · SDI Wages', $(t.gross), 'No wage base cap since 2024 (SB 951)'],
+    ['Line C · SDI Withheld', $(t.ca_sdi), `SDI rate ${(r.ca_sdi * 100).toFixed(1)}%`],
+    ['Line D · CA PIT Withheld', $(t.pit), 'State income tax withheld from employees'],
+    ['TOTAL Deposit Due', $(de9Total), 'Line A + B + C + D'],
+  ];
+
+  // -------- DE 9C sheet --------
+  const splitName = (fullName) => {
+    const s = String(fullName || '').trim();
+    if (!s) return ['', ''];
+    const idx = s.indexOf(' ');
+    if (idx === -1) return [s, ''];
+    return [s.slice(0, idx), s.slice(idx + 1).trim()];
+  };
+  const de9c = [
+    ['CA EDD DE 9C — Quarterly Wage Report (per-employee)'],
+    [],
+    ['Portal', 'Same as DE 9 — DE 9C appears in the same filing flow'],
+    ['Deadline', deadline],
+    ['Instructions', 'IMPORTANT: fill in the SSN column from your own records — the payroll app does not store SSNs. Type each row into the DE 9C page on the portal.'],
+    [],
+    ['SSN (fill in)', 'First Name', 'Last Name', 'Subject Wages', 'PIT Wages', 'PIT Withheld', 'Wage Plan Code'],
+  ];
+  for (const emp of STATE.employees) {
+    const s = quarterlyEmployeeSummary(emp, year, quarter);
+    if (s.paystub_count === 0) continue;
+    const [firstName, lastName] = splitName(emp.name);
+    de9c.push(['', firstName, lastName, $(s.gross), $(s.gross), $(s.pit), 'S']);
+  }
+
+  // -------- Form 941 sheet --------
+  // Recomputes the same lines renderForm941Section renders — see that
+  // function for the rationale on each calculation.
+  const l1 = form941Line1(year, quarter);
+  const ssCombinedRate  = r.ss_ee + r.ss_er;
+  const medCombinedRate = r.medicare_ee + r.medicare_er;
+  const line5a_col2 = round2(t.ss_taxable * ssCombinedRate);
+  const line5c_col2 = round2(t.medicare_taxable * medCombinedRate);
+  const line5d_col2 = round2(t.addl_medicare_wages * r.addl_medicare);
+  const line5e      = round2(line5a_col2 + line5c_col2 + line5d_col2);
+  const line6       = round2(t.fit + line5e);
+  const depositedSocMed = round2(t.ss_ee + t.ss_er + t.medicare_ee + t.medicare_er);
+  const formCleanSocMed = round2(line5a_col2 + line5c_col2);
+  const line7  = round2(depositedSocMed - formCleanSocMed);
+  const line10 = round2(line6 + line7);
+  const line11 = 0;
+  const line12 = round2(line10 - line11);
+  const line13 = round2(t.fit + t.ss_ee + t.ss_er + t.medicare_ee + t.medicare_er + line5d_col2);
+  const line14 = round2(Math.max(0, line12 - line13));
+  const line15 = round2(Math.max(0, line13 - line12));
+
+  const form941 = [
+    ["IRS Form 941 — Employer's Quarterly Federal Tax Return"],
+    [],
+    ['Portal', 'IRS e-file (via your tax software or IRS Free File)'],
+    ['Deadline', deadline],
+    ['Instructions', 'Open Form 941 in your tax software. For each line below, type the Value into the matching numbered field on the form.'],
+    [],
+    ['Field', 'Value', 'Notes'],
+    ['EIN', company.ein || '(not set)', 'From your IRS SS-4 confirmation letter'],
+    ['Quarter', `Q${quarter} ${year}`, quarterRange],
+    ['Line 1 · Number of employees paid', l1.pending ? 'Pending' : l1.count, `Pay period including ${middleMonthName} 12, ${year}`],
+    ['Line 2 · Total wages', $(t.gross), 'Total gross wages paid this quarter'],
+    ['Line 3 · Federal income tax withheld', $(t.fit), 'Sum of FIT withheld from all paychecks'],
+    ['Line 5a Col 1 · SS taxable wages', $(t.ss_taxable), `Wages capped at $${(r.ss_wage_base || 184500).toLocaleString()} per employee YTD`],
+    ['Line 5a Col 2 · SS tax', $(line5a_col2), 'Combined employee 6.2% + employer 6.2% = 12.4%'],
+    ['Line 5c Col 1 · Medicare taxable wages', $(t.medicare_taxable), 'No wage base cap'],
+    ['Line 5c Col 2 · Medicare tax', $(line5c_col2), 'Combined 1.45% + 1.45% = 2.9%'],
+    ['Line 5d Col 1 · Additional Medicare wages', $(t.addl_medicare_wages), 'Only wages over $200,000 YTD (usually $0 for small firms)'],
+    ['Line 5d Col 2 · Additional Medicare tax', $(line5d_col2), '0.9% rate, employee-only'],
+    ['Line 5e · Total SS + Medicare', $(line5e), 'Sum of Col 2 from 5a + 5c + 5d'],
+    ['Line 6 · Total taxes before adjustments', $(line6), 'Line 3 + Line 5e'],
+    ['Line 7 · Fractions-of-cents adjustment', $(line7), 'Rounding reconciliation (usually pennies)'],
+    ['Line 10 · Total taxes after adjustments', $(line10), 'Line 6 + Line 7'],
+    ['Line 11 · R&D credit', $(line11), '$0 unless the firm elected this credit on Form 8974'],
+    ['Line 12 · Total taxes after credits', $(line12), 'Line 10 − Line 11 (this is what you OWE for the quarter)'],
+    ['Line 13 · Total deposits this quarter', $(line13), 'What you already paid via EFTPS during Q' + quarter],
+    ['Line 14 · Balance due', $(line14), 'Only fill in if Line 12 > Line 13 (pay this with the return)'],
+    ['Line 15 · Overpayment', $(line15), 'Only fill in if Line 13 > Line 12 (request refund or credit)'],
+  ];
+
+  // -------- Build and download the workbook --------
+  const wb = XLSX.utils.book_new();
+
+  const coverSheet = XLSX.utils.aoa_to_sheet(cover);
+  coverSheet['!cols'] = [{ wch: 30 }, { wch: 50 }, { wch: 40 }, { wch: 30 }];
+  XLSX.utils.book_append_sheet(wb, coverSheet, 'Cover');
+
+  const form941Sheet = XLSX.utils.aoa_to_sheet(form941);
+  form941Sheet['!cols'] = [{ wch: 45 }, { wch: 18 }, { wch: 60 }];
+  XLSX.utils.book_append_sheet(wb, form941Sheet, 'Form 941');
+
+  const de9Sheet = XLSX.utils.aoa_to_sheet(de9);
+  de9Sheet['!cols'] = [{ wch: 32 }, { wch: 18 }, { wch: 50 }];
+  XLSX.utils.book_append_sheet(wb, de9Sheet, 'DE 9');
+
+  const de9cSheet = XLSX.utils.aoa_to_sheet(de9c);
+  de9cSheet['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+  XLSX.utils.book_append_sheet(wb, de9cSheet, 'DE 9C');
+
+  XLSX.writeFile(wb, `annalee-filing-packet-${year}-Q${quarter}.xlsx`);
 }
 
 
