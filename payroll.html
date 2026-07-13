@@ -3839,6 +3839,10 @@ function renderTaxFilings() {
              Exports the currently-selected quarter for all employees who
              had at least one active paystub. -->
         <button class="btn admin-only" onclick="downloadQuarterlyCsv(${selected.year}, ${selected.quarter})" title="Download Q${selected.quarter} ${selected.year} totals as a CSV file for accountant / Excel / QuickBooks / Form 941 prep">Download CSV</button>
+        <!-- [Batch3-9C] DE 9C CSV export — CA EDD per-employee wage detail.
+             SSN column is blank in the output; admin fills in before uploading
+             to CA EDD e-Services. Every other field is pre-computed. -->
+        <button class="btn admin-only" onclick="downloadDE9CCsv(${selected.year}, ${selected.quarter})" title="Download the CA EDD DE 9C per-employee detail as a CSV file. SSN column will be blank — fill in manually before uploading to EDD e-Services.">Download DE 9C</button>
       </div>
     </div>
 
@@ -8032,6 +8036,77 @@ function downloadQuarterlyCsv(year, quarter) {
   }
 
   downloadCsv(`annalee-payroll-quarterly-${year}-Q${quarter}.csv`, headers, rows);
+}
+
+
+// [Batch3-9C] CA EDD DE 9C per-employee wage detail export. One row per
+// employee who had at least one active paystub in the selected quarter,
+// formatted for the DE 9C form fields.
+//
+// LIMITATION: the payroll app doesn't store SSNs, so the ssn column is
+// output blank. Admin fills in each SSN before uploading to CA EDD
+// e-Services for Business. Everything else (name split, quarterly gross,
+// PIT wages, PIT withheld, wage plan code) is pre-computed so the manual
+// data entry is limited to just SSN + reviewing the auto-filled columns.
+//
+// Column shape matches the CA EDD DE 9C paper form layout:
+//   ssn              — Social Security Number (BLANK, fill in manually)
+//   first_name       — first token of the employee's name
+//   last_name        — remainder of the employee's name (or "" for single-word)
+//   subject_wages    — quarterly gross (same as DE 9 line for this employee)
+//   pit_wages        — CA PIT wages (typically = subject_wages for standard hires)
+//   pit_withheld     — CA PIT withheld this quarter
+//   wage_plan_code   — 'S' default (State-run SDI). Change to P/U/V if the
+//                      firm switches to a private / union / voluntary plan.
+function downloadDE9CCsv(year, quarter) {
+  if (!requireAdmin('Export DE 9C CSV')) return;
+
+  const headers = [
+    'ssn',
+    'first_name',
+    'last_name',
+    'subject_wages',
+    'pit_wages',
+    'pit_withheld',
+    'wage_plan_code'
+  ];
+
+  const N = v => (v == null ? 0 : Number(v));
+
+  // Simple name split: first token = first_name, rest = last_name.
+  // Handles single-word names by returning ('', '') → the whole name lands
+  // in first_name. Admins can edit the CSV before upload if a specific
+  // employee has a preferred split (e.g., "Mary Jane Smith").
+  const splitName = (fullName) => {
+    const s = String(fullName || '').trim();
+    if (!s) return ['', ''];
+    const idx = s.indexOf(' ');
+    if (idx === -1) return [s, ''];
+    return [s.slice(0, idx), s.slice(idx + 1).trim()];
+  };
+
+  const rows = [];
+  for (const emp of STATE.employees) {
+    const s = quarterlyEmployeeSummary(emp, year, quarter);
+    if (s.paystub_count === 0) continue;
+    const [firstName, lastName] = splitName(emp.name);
+    rows.push([
+      '',                             // ssn — BLANK, admin fills in
+      firstName,
+      lastName,
+      N(s.gross).toFixed(2),          // subject wages
+      N(s.gross).toFixed(2),          // pit wages (typically = subject wages)
+      N(s.pit).toFixed(2),            // PIT withheld
+      'S'                             // wage plan code — default 'S' (SDI)
+    ]);
+  }
+
+  if (rows.length === 0) {
+    showToast(`No paystubs found for Q${quarter} ${year}.`, 'info');
+    return;
+  }
+
+  downloadCsv(`annalee-de9c-${year}-Q${quarter}.csv`, headers, rows);
 }
 
 
