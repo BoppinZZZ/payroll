@@ -1000,6 +1000,19 @@
     margin-left: 6px;
     cursor: help;
   }
+  /* [Batch3-6] Time entry warnings — amber to signal "double-check this"
+     rather than the red mileage-warning which signals "missing required
+     field." Used inline in the Hours column when a shift looks suspicious
+     (long shift, date outside period, silent overnight roll, missing
+     date). Reuses the same layout tokens so both indicators align. */
+  .time-warning {
+    display: inline-block;
+    color: var(--amber);
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 6px;
+    cursor: help;
+  }
 
   /* ==========================================================================
      RC-2 — RECEIPT FILE CELL (Run Payroll → Reimbursements table)
@@ -4836,6 +4849,67 @@ function hoursFromClocks(clockIn, clockOut) {
   return diff / 60;
 }
 
+// [Batch3-6] Time entry validation warnings.
+// Returns an array of warning strings for a single time_entry, based on the
+// current pay period's range. Empty array means the entry looks clean.
+//
+// Fires four kinds of "double-check this" warnings — all non-blocking, all
+// display as an inline amber icon in the Hours cell with a title tooltip:
+//   1. Shift longer than 16 hours — matches the existing [BUG-11] threshold
+//      at finalize, but catches typos while the user is still typing.
+//   2. Date outside the current pay period — catches accidentally entered
+//      dates for the previous or upcoming period.
+//   3. clock_out earlier than clock_in — currently rolled silently as an
+//      overnight shift (hoursFromClocks adds 24h). If the user intended
+//      an overnight shift, they can ignore; if not, the warning surfaces
+//      the AM/PM typo.
+//   4. Times entered with no date — the row records hours but they'll be
+//      persisted under an empty date, which flows into time_entries with
+//      NULL work_date. Warn so the user fills the date before finalize.
+//
+// currentPeriod may be null if called before STATE.current_period is set
+// (e.g., initial render race). All checks that need the period gracefully
+// skip in that case.
+function getTimeEntryWarnings(te, currentPeriod) {
+  const warnings = [];
+  if (!te) return warnings;
+
+  const hasInTime  = !!(te.clock_in && te.clock_in.trim());
+  const hasOutTime = !!(te.clock_out && te.clock_out.trim());
+  const hasDate    = !!(te.date && String(te.date).trim());
+
+  // Long shift (post-overnight-roll, so this is the actual computed shift length).
+  const hrs = hoursFromClocks(te.clock_in, te.clock_out);
+  if (hrs > 16) {
+    warnings.push(`Shift is ${hrs.toFixed(2)} hours — is that right?`);
+  }
+
+  // Silent overnight roll — clock_out parses to a smaller minute value than
+  // clock_in. hoursFromClocks silently added 24h; we surface the ambiguity.
+  if (hasInTime && hasOutTime) {
+    const inMin  = parseTimeToMinutes(te.clock_in);
+    const outMin = parseTimeToMinutes(te.clock_out);
+    if (inMin !== null && outMin !== null && outMin < inMin) {
+      warnings.push('Clock-out is before clock-in — logging as an overnight shift. Is that right?');
+    }
+  }
+
+  // Date outside the current pay period. String compare works because dates
+  // are stored as ISO YYYY-MM-DD which is lexicographically sortable.
+  if (hasDate && currentPeriod && currentPeriod.start && currentPeriod.end) {
+    if (te.date < currentPeriod.start || te.date > currentPeriod.end) {
+      warnings.push(`Date is outside PP${currentPeriod.pp} (${currentPeriod.start} – ${currentPeriod.end})`);
+    }
+  }
+
+  // Times entered but no date — the row would persist with a NULL work_date.
+  if ((hasInTime || hasOutTime) && !hasDate) {
+    warnings.push('Missing date on this entry');
+  }
+
+  return warnings;
+}
+
 // Generate the list of ISO dates from start to end inclusive (14 days for bi-weekly).
 function generatePeriodDays(startIso, endIso) {
   const result = [];
@@ -6272,12 +6346,20 @@ function renderRunPayrollEntry(empId) {
     const h = hoursFromClocks(te.clock_in, te.clock_out);
     const hoursDisplay = h > 0 ? h.toFixed(2) + " hr" : "—";
     const rowClass = (te.date && te.date === status.todayIso) ? ' class="today-row"' : '';
+    // [Batch3-6] Inline warning icon when the entry looks suspicious.
+    // Multiple warnings join with " · " in the tooltip. Amber ⚠ icon is
+    // gentler than the red icon used for missing-required mileage fields —
+    // these are "double-check" nudges, not blocking errors.
+    const warnings = getTimeEntryWarnings(te, STATE.current_period);
+    const warningIcon = warnings.length > 0
+      ? `<span class="time-warning" title="${esc(warnings.join(' · '))}">⚠</span>`
+      : '';
     return `
       <tr${rowClass}>
         <td><input type="date" value="${esc(te.date)}" onchange="updateDraftTime('${emp.id}', ${i}, 'date', this.value)" class="cell-input"></td>
         <td><input type="text" value="${esc(te.clock_in)}" placeholder="9:00 AM or 22:00" onchange="updateDraftTime('${emp.id}', ${i}, 'clock_in', this.value)" class="cell-input"></td>
         <td><input type="text" value="${esc(te.clock_out)}" placeholder="5:30 PM" onchange="updateDraftTime('${emp.id}', ${i}, 'clock_out', this.value)" class="cell-input"></td>
-        <td class="num auto-cell">${hoursDisplay}</td>
+        <td class="num auto-cell">${hoursDisplay}${warningIcon}</td>
         <td class="row-actions"><button class="btn-icon" onclick="removeDraftTime('${emp.id}', ${i})" title="Remove day">×</button></td>
       </tr>`;
   }).join("");
@@ -10929,20 +11011,35 @@ async function submitEmployeeModal() {
     if (duplicate) {
       const statusLabel = duplicate.active ? 'active' : 'inactive';
       const codeLabel   = duplicate.employee_id ? `, code ${duplicate.employee_id}` : '';
-      const msg =
+
+      // [Batch2-2A-v2] Two-step confirm. The original v1 collapsed everything
+      // into one confirm where OK meant "reactivate" and Cancel meant "add
+      // duplicate anyway" — which was backwards from the natural expectation
+      // that Cancel means "abort." Chris hit exactly that on 2026-07-12 and
+      // ended up with a duplicate Christopher Chan row that had to be cleaned
+      // via SQL. Splitting into two sequential confirms restores the natural
+      // semantics at each step: OK = do the thing named in the prompt,
+      // Cancel = don't.
+
+      // Step 1 — ask about reactivating / keeping the existing record.
+      const reactivateMsg =
         `There's already an employee named "${duplicate.name}" (${statusLabel}${codeLabel}).\n\n` +
-        `Click OK to keep the existing record — reactivating it if needed. Nothing you just typed will be applied; use Edit Employee afterward if you need to update the record.\n\n` +
-        `Click Cancel to add "${nameRaw}" as a NEW employee anyway (both will exist with the same name).`;
-      if (confirm(msg)) {
+        (duplicate.active
+          ? `Keep the existing active record and cancel this Add?`
+          : `Reactivate the existing inactive record instead of creating a new one?`) +
+        `\n\nOK = ${duplicate.active ? 'keep the existing record (nothing changes)' : 'reactivate the existing record'}\n` +
+        `Cancel = don't do that — you'll be asked next whether to add a duplicate anyway`;
+
+      if (confirm(reactivateMsg)) {
+        // User chose to reactivate / keep the existing record. Close the Add
+        // modal and either reactivate (if inactive) or no-op (if active).
         closeAddEmployeeModal();
         if (duplicate.active) {
           showToast(`${duplicate.name} is already active — no change made.`, 'info');
           return;
         }
-        // Inline reactivation to avoid the double-confirm that
-        // reactivateEmployee() shows. Mirrors that function's cloud-first,
-        // then-STATE pattern so a failed cloud write doesn't leave STATE
-        // out of sync with the DB.
+        // Inline reactivation. Mirrors reactivateEmployee's cloud-first
+        // pattern so a failed cloud write doesn't leave STATE out of sync.
         const isDevMode = window.location.protocol === 'file:';
         try {
           if (!isDevMode) {
@@ -10953,13 +11050,28 @@ async function submitEmployeeModal() {
           showView("employees");
           showToast(`${duplicate.name} reactivated.`, 'success');
         } catch (err) {
-          console.error('[Batch2-2A] reactivate failed:', err);
+          console.error('[Batch2-2A-v2] reactivate failed:', err);
           showToast('Could not reactivate ' + duplicate.name + ' — ' + (err.message || 'unknown error') + '.', 'error');
         }
         return;
       }
-      // User chose Cancel on the confirm → they explicitly want a duplicate.
-      // Fall through to the normal Add flow below.
+
+      // Step 2 — user declined reactivation. Ask explicitly whether they want
+      // to add a duplicate. This is the important step that the v1 UX skipped.
+      const addAnywayMsg =
+        `Are you sure you want to add "${nameRaw}" as a NEW employee?\n\n` +
+        `You'll have two employees with the same name. This is rarely intentional.\n\n` +
+        `OK = add "${nameRaw}" as a duplicate anyway\n` +
+        `Cancel = don't add anything (recommended)`;
+
+      if (!confirm(addAnywayMsg)) {
+        // User cancelled — abort the Add entirely. Modal stays open so they
+        // can adjust the form (e.g., correct a typo in the name) and try
+        // again. Nothing is written to the DB.
+        return;
+      }
+      // User confirmed they genuinely want to add a duplicate.
+      // Fall through to createEmployeeFromForm below.
     }
 
     createEmployeeFromForm(fields);
