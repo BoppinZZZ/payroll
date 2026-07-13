@@ -3055,6 +3055,10 @@ function renderDashboard() {
     <div class="panel">
       <div class="panel-header">
         <div class="panel-title">YTD by Employee</div>
+        <!-- [Batch3-9] YTD summary CSV export button. Admin-only.
+             One row per employee for the current year, includes both
+             employee-withheld and employer-paid tax totals. -->
+        <button class="btn admin-only" onclick="downloadYtdCsv()" title="Download the current-year YTD totals as a CSV file for accountant / Excel / QuickBooks">Download CSV</button>
       </div>
       <table>
         <thead>
@@ -3454,7 +3458,12 @@ function renderHistory() {
         <div class="page-title">Payroll History</div>
         <div class="page-sub">All completed pay periods · ${new Date().getFullYear()} tax year</div>
       </div>
-      ${toggleButton}
+      <div style="display:flex; gap:8px;">
+        ${toggleButton}
+        <!-- [Batch3-9] Paystub detail CSV export. Admin-only. All current-year
+             paystubs including voided (with voided=true column). -->
+        <button class="btn admin-only" onclick="downloadPaystubsCsv()" title="Download all ${new Date().getFullYear()} paystubs as a CSV file for accountant / Excel / QuickBooks">Download CSV</button>
+      </div>
     </div>
     ${sections}
   `;
@@ -3819,11 +3828,17 @@ function renderTaxFilings() {
         <div class="page-title">Tax Filings</div>
         <div class="page-sub">Quarterly numbers for EFTPS deposits, Form 941, Form 940, and CA EDD DE 88</div>
       </div>
-      <div class="quarter-select-wrap">
-        <label class="quarter-select-label" for="tax-filings-quarter">Quarter</label>
-        <select id="tax-filings-quarter" class="quarter-select" onchange="selectTaxFilingsQuarter(this.value)">
-          ${options}
-        </select>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <div class="quarter-select-wrap">
+          <label class="quarter-select-label" for="tax-filings-quarter">Quarter</label>
+          <select id="tax-filings-quarter" class="quarter-select" onchange="selectTaxFilingsQuarter(this.value)">
+            ${options}
+          </select>
+        </div>
+        <!-- [Batch3-9] Quarterly summary CSV export button. Admin-only.
+             Exports the currently-selected quarter for all employees who
+             had at least one active paystub. -->
+        <button class="btn admin-only" onclick="downloadQuarterlyCsv(${selected.year}, ${selected.quarter})" title="Download Q${selected.quarter} ${selected.year} totals as a CSV file for accountant / Excel / QuickBooks / Form 941 prep">Download CSV</button>
       </div>
     </div>
 
@@ -7792,6 +7807,233 @@ async function rolloverToNextPeriod() {
 // that is a full snapshot of STATE. Import reads such a file, validates
 // it, and replaces STATE after a clear confirmation dialog.
 // ============================================================================
+
+// [Batch3-9] Generic CSV download helper. Called by each CSV export button
+// on Dashboard / History / Tax Filings.
+//
+// Handles the boring parts of CSV correctly:
+//   • Escape any value containing comma, quote, CR, or LF by wrapping it in
+//     double quotes and doubling internal quotes (RFC 4180).
+//   • Prepend UTF-8 BOM (﻿) so Excel opens special characters (é, ñ,
+//     etc.) correctly instead of showing mojibake.
+//   • Blob + object URL + click a temporary <a> — same pattern exportBackup
+//     uses. No dependencies.
+//
+// Values pass through as-is otherwise. Callers are expected to have already
+// formatted numbers (e.g., toFixed(2)) and dates (ISO YYYY-MM-DD) exactly as
+// they want them to appear in the spreadsheet — plain numbers, no $ signs,
+// no thousands separators. This matches how accountants expect data to
+// import into Excel / QuickBooks.
+//
+// Usage:
+//   downloadCsv('paystubs-2026.csv',
+//     ['pay_date', 'employee_name', 'gross'],
+//     [['2026-01-15', 'Annie Cheng', '410.42'], ...]);
+function downloadCsv(filename, headers, rows) {
+  const escapeCell = (v) => {
+    if (v == null) return '';
+    const s = String(v);
+    if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const headerLine = headers.map(escapeCell).join(',');
+  const rowLines   = rows.map(row => row.map(escapeCell).join(','));
+  // ﻿ BOM makes Excel autodetect UTF-8; \r\n line endings match RFC 4180
+  // and behave better than \n on Windows.
+  const csv  = '﻿' + headerLine + '\r\n' + rowLines.join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+
+// [Batch3-9] Paystub detail CSV export — one row per paystub for the current
+// year, including voided rows (with voided=true column) so accountant can
+// filter as needed. Wired to the "Download CSV" button on the History page.
+//
+// Currency values are pre-rounded via toFixed(2) so Excel doesn't apply its
+// own rounding. Pay_date uses payDateOf() so it stays consistent with what
+// the paystub PDF and Tax Filings show. Sorted ascending by pay_date so the
+// spreadsheet reads naturally.
+function downloadPaystubsCsv() {
+  if (!requireAdmin('Export Paystubs CSV')) return;
+
+  const currentYear = new Date().getFullYear();
+  const headers = [
+    'pay_date', 'pp_number', 'employee_id', 'employee_name',
+    'hours', 'gross',
+    'fit', 'ss_ee', 'medicare_ee', 'ca_pit', 'ca_sdi',
+    'ss_er', 'medicare_er', 'suta', 'ett', 'futa',
+    'reimbursement', 'mileage_amount', 'net_pay',
+    'voided'
+  ];
+
+  const rows = [];
+  const N = v => (v == null ? 0 : Number(v));
+
+  for (const emp of STATE.employees) {
+    for (const p of emp.periods) {
+      if (yearOfDate(p.end_date) !== currentYear) continue;
+      const et = p.employer_taxes || {};
+      const t  = p.taxes || {};
+      rows.push([
+        payDateOf(p) || '',
+        p.pp,
+        emp.employee_id || '',
+        emp.name || '',
+        N(p.total_hours).toFixed(2),
+        N(p.gross_pay).toFixed(2),
+        N(t.federal).toFixed(2),
+        N(t.ss).toFixed(2),
+        N(t.medicare).toFixed(2),
+        N(t.ca_state).toFixed(2),
+        N(t.ca_sdi).toFixed(2),
+        N(et.ss_er).toFixed(2),
+        N(et.medicare_er).toFixed(2),
+        N(et.suta).toFixed(2),
+        N(et.ett).toFixed(2),
+        N(et.futa).toFixed(2),
+        N(p.reimbursement).toFixed(2),
+        N(p.mileage_dollars).toFixed(2),
+        N(p.net_pay).toFixed(2),
+        p.voided ? 'true' : 'false'
+      ]);
+    }
+  }
+
+  rows.sort((a, b) => (a[0] || '').localeCompare(b[0] || ''));
+
+  if (rows.length === 0) {
+    showToast(`No paystubs found for ${currentYear} yet.`, 'info');
+    return;
+  }
+
+  downloadCsv(`annalee-payroll-paystubs-${currentYear}.csv`, headers, rows);
+}
+
+
+// [Batch3-9] YTD summary CSV export — one row per employee, current year.
+// Includes both employee-withheld taxes (via ytdTotalsForYear) and employer
+// taxes (summed inline since ytdTotals doesn't aggregate employer_taxes).
+// Wired to the "Download CSV" button on the Dashboard's YTD by Employee panel.
+function downloadYtdCsv() {
+  if (!requireAdmin('Export YTD CSV')) return;
+
+  const currentYear = new Date().getFullYear();
+  const headers = [
+    'employee_id', 'name', 'paystubs_count',
+    'gross_ytd', 'reimbursement_ytd', 'taxes_withheld_ytd', 'net_ytd',
+    'ss_er_ytd', 'medicare_er_ytd', 'suta_ytd', 'ett_ytd', 'futa_ytd'
+  ];
+
+  const N = v => (v == null ? 0 : Number(v));
+  const rows = [];
+
+  for (const emp of STATE.employees) {
+    const t = ytdTotalsForYear(emp, currentYear);
+    const activePeriods = emp.periods.filter(p =>
+      yearOfDate(p.end_date) === currentYear && isPaystubActive(p)
+    );
+    const employerTotals = activePeriods.reduce((acc, p) => {
+      const et = p.employer_taxes || {};
+      acc.ss_er       += N(et.ss_er);
+      acc.medicare_er += N(et.medicare_er);
+      acc.suta        += N(et.suta);
+      acc.ett         += N(et.ett);
+      acc.futa        += N(et.futa);
+      return acc;
+    }, { ss_er: 0, medicare_er: 0, suta: 0, ett: 0, futa: 0 });
+
+    const taxesWithheld = t.federal + t.ca_state + t.ss + t.medicare + t.ca_sdi;
+
+    rows.push([
+      emp.employee_id || '',
+      emp.name || '',
+      activePeriods.length,
+      t.gross.toFixed(2),
+      t.reimb.toFixed(2),
+      taxesWithheld.toFixed(2),
+      t.net.toFixed(2),
+      employerTotals.ss_er.toFixed(2),
+      employerTotals.medicare_er.toFixed(2),
+      employerTotals.suta.toFixed(2),
+      employerTotals.ett.toFixed(2),
+      employerTotals.futa.toFixed(2)
+    ]);
+  }
+
+  if (rows.length === 0) {
+    showToast('No employees found.', 'info');
+    return;
+  }
+
+  downloadCsv(`annalee-payroll-ytd-${currentYear}.csv`, headers, rows);
+}
+
+
+// [Batch3-9] Quarterly summary CSV export — one row per employee for the
+// SELECTED quarter on the Tax Filings page. Uses quarterlyEmployeeSummary
+// (same helper the on-screen cards use) so the CSV numbers exactly match
+// what's rendered — nothing is recomputed.
+//
+// Only exports employees who had at least one active paystub in the quarter,
+// matching the on-screen filter at line ~3850.
+function downloadQuarterlyCsv(year, quarter) {
+  if (!requireAdmin('Export Quarterly CSV')) return;
+
+  const headers = [
+    'quarter', 'year',
+    'employee_id', 'name', 'paystubs_count',
+    'gross',
+    'fit', 'ss_ee', 'medicare_ee', 'ca_pit', 'ca_sdi',
+    'ss_er', 'medicare_er', 'suta', 'ett', 'futa',
+    'ss_taxable', 'medicare_taxable', 'suta_taxable', 'futa_taxable',
+    'addl_medicare_wages'
+  ];
+
+  const rows = [];
+  for (const emp of STATE.employees) {
+    const s = quarterlyEmployeeSummary(emp, year, quarter);
+    if (s.paystub_count === 0) continue;
+    rows.push([
+      `Q${quarter}`,
+      year,
+      emp.employee_id || '',
+      emp.name || '',
+      s.paystub_count,
+      s.gross.toFixed(2),
+      s.fit.toFixed(2),
+      s.ss_ee.toFixed(2),
+      s.medicare_ee.toFixed(2),
+      s.pit.toFixed(2),
+      s.ca_sdi.toFixed(2),
+      s.ss_er.toFixed(2),
+      s.medicare_er.toFixed(2),
+      s.suta.toFixed(2),
+      s.ett.toFixed(2),
+      s.futa.toFixed(2),
+      s.ss_taxable.toFixed(2),
+      s.medicare_taxable.toFixed(2),
+      s.suta_taxable.toFixed(2),
+      s.futa_taxable.toFixed(2),
+      s.addl_medicare_wages.toFixed(2)
+    ]);
+  }
+
+  if (rows.length === 0) {
+    showToast(`No paystubs found for Q${quarter} ${year}.`, 'info');
+    return;
+  }
+
+  downloadCsv(`annalee-payroll-quarterly-${year}-Q${quarter}.csv`, headers, rows);
+}
+
 
 function exportBackup() {
   if (!requireAdmin('Export Backup')) return;
