@@ -2940,7 +2940,17 @@ function renderDashboard() {
       </tr>`;
   }).join("");
 
-  const latestPeriodDate = STATE.employees[0]?.periods.find(p => p.pp === latestPP)?.end_date;
+  // [Batch1-4] Search across ALL employees for the latest PP's end date
+  // instead of only STATE.employees[0]. The old code assumed index 0 had a
+  // paystub for latestPP — but latestPP is computed cross-employee (line
+  // ~2902), so index 0 might be a newly-added employee (like Josh mid-period)
+  // without that paystub. Result would silently return undefined and hide
+  // the "End date: ..." row from the dashboard even though other employees
+  // DO have the paystub. flatMap + find picks the first matching end_date
+  // across the roster.
+  const latestPeriodDate = STATE.employees
+    .flatMap(e => e.periods)
+    .find(p => p.pp === latestPP)?.end_date;
 
   return `
     <div class="page-header">
@@ -3289,7 +3299,10 @@ function renderNonAdminStub() {
       <p style="margin:0 0 24px; color:var(--muted); line-height:1.6;">
         Welcome! Your timesheet will appear here once your admin links your account to your employee record. This usually takes just a few minutes — please reach out to your administrator.
       </p>
-      <a class="btn primary" href="mailto:chrischan9231@gmail.com?subject=Payroll%20App%20Account%20Setup" style="text-decoration:none;">Contact admin</a>
+      <!-- [Batch1-4C] Contact-admin email uses Company Settings if configured
+           so email swaps don't require a code push. Falls back to Chris's
+           original address for un-configured / pre-migration installs. -->
+      <a class="btn primary" href="mailto:${esc(STATE.company?.email || 'chrischan9231@gmail.com')}?subject=Payroll%20App%20Account%20Setup" style="text-decoration:none;">Contact admin</a>
     </div>
   `;
 }
@@ -3300,7 +3313,13 @@ function renderHistory() {
   // if RLS accidentally returns more rows, we filter defensively in the UI.
   let historyEmployees;
   if (currentUserRole === 'admin') {
-    historyEmployees = STATE.employees;
+    // [Batch1-3] Mirror the filter used in renderEmployees (line ~3155) so
+    // inactive employees with zero paystubs don't render as empty sections.
+    // Applies only to the admin view — employee view already scopes to a
+    // single record via findOwnEmployee below, so no filter needed there.
+    historyEmployees = STATE.employees.filter(emp =>
+      emp.active || (emp.periods && emp.periods.length > 0)
+    );
   } else {
     const ownEmp = findOwnEmployee();
     if (!ownEmp) return renderNonAdminStub();
@@ -5316,12 +5335,19 @@ function queueDraftSync(employeeId) {
 }
 
 async function runDraftSyncLoop(employeeId, s) {
-  // [LF-1] Don't change indicator. localStorage already persisted the data
-  // (saveState in mutators), so 'saved' is the truth from the user's POV.
-  // Cloud sync runs invisibly; failures are logged but not shown.
+  // [Batch1-1B] Wire setSaveStatus into the sync loop so the visible chip
+  // reflects actual cloud sync state. Reverses part of the original [LF-1]
+  // silent policy — see comment in scheduleDraftSync for full rationale.
+  // Three transitions:
+  //   • 'saving' at the top of each while iteration (only when actually
+  //     about to sync, so an already-drained loop doesn't flash 'saving')
+  //   • 'saved' after the while loop drains cleanly
+  //   • 'error' in the catch for a real failure (NOT the visibility-hidden
+  //     abort, which is a deferred retry and shouldn't look like a failure)
   try {
     while (s.dirty) {
       s.dirty = false;
+      setSaveStatus('saving');
       // [AS-7/AS-8/AS-9] Bulletproof 60s timeout via Promise.race. AbortController
       // tries to cancel the underlying fetch (best effort). Promise.race
       // guarantees the await rejects after 60s regardless, so the loop
@@ -5352,26 +5378,29 @@ async function runDraftSyncLoop(employeeId, s) {
           s.dirty = true;
           return;
         }
-        // [LF-1] Cloud sync failed. Data is safely in localStorage already
-        // (saveState wrote it before queueing this sync), so the user isn't
-        // affected. Log to console for debugging and exit silently — don't
-        // surface as a visible error. Next typing event triggers a fresh
-        // attempt; on refresh, hydrateAndRender restores the local draft.
+        // [Batch1-1B] Cloud sync failed. Data is still safely in localStorage
+        // (saveState wrote it before queueing this sync), so the user hasn't
+        // LOST anything yet — but a silent failure is exactly what caused the
+        // 2026-06-30 Annie incident. Surface 'error' state so the user notices
+        // BEFORE they refresh and discover their data didn't make it to cloud.
+        // The chip label ("Couldn't save — please refresh") tells them what to
+        // do. Next typing event will trigger a fresh sync attempt.
         const errMsg = (err && err.message) || String(err);
-        console.warn('[LF-1] cloud sync failed silently (data is in localStorage):', errMsg);
-        // [ERR-LOG] This is the exact symptom Annie hit (orphaned receipts).
-        // Logging here surfaces "Annie's syncs have been failing for N days"
-        // to admin's weekly review query before it accumulates as a real
-        // data integrity problem.
+        console.warn('[Batch1-1B] cloud sync failed (data still in localStorage):', errMsg);
+        // [ERR-LOG] Persist so admin's weekly review can see repeat failures.
         logError('draft-sync', err, { employee_id: employeeId });
+        setSaveStatus('error');
         return;
       } finally {
         clearTimeout(timeoutId);
       }
     }
-    // [LF-1] Loop drained — cloud caught up to localStorage. No status
-    // change needed; indicator already showed 'saved' from the moment
-    // the user typed.
+    // [Batch1-1B] Loop drained — cloud caught up to localStorage. Flip the
+    // chip back to 'saved' so the user sees confirmation. If they typed
+    // again during this iteration, s.dirty would be true and we'd have
+    // stayed in the loop, so reaching here genuinely means "cloud is caught
+    // up" as of this moment.
+    setSaveStatus('saved');
   } finally {
     s.running = null;
     s.abortController = null;
@@ -5522,8 +5551,15 @@ function scheduleDraftSync(employeeId, delayMs = 0) {
   // calls this — so adding to the whitelist here is always intentional.
   tabSyncWhitelist.add(employeeId);
 
-  // [LF-1] Don't set 'unsaved' status — saveState already wrote the data
-  // to localStorage (the local source of truth). Cloud sync runs invisibly.
+  // [Batch1-1B] Show 'unsaved' the moment the user types. Replaces the
+  // original [LF-1] silent policy that kept the chip stuck on "saved"
+  // regardless of cloud state. Rationale: on 2026-06-30 an admin-side
+  // sync silently failed for Annie's data (EMERGENCY-FIX block), and the
+  // chip lying meant the user only discovered the loss on refresh. Making
+  // the chip honest (transient 'saving' → 'saved' or 'error') catches
+  // sync problems immediately instead of hiding them. Runs harmlessly if
+  // the chip element isn't in the DOM (e.g., user not on Run Payroll).
+  setSaveStatus('unsaved');
 
   const existing = draftAutoSaveTimers.get(employeeId);
   if (existing) clearTimeout(existing);
