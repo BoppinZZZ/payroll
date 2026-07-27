@@ -2895,6 +2895,127 @@ function renderDeadlineReminderBanner() {
   `;
 }
 
+// [ETC-1] Employer Tax Consistency check — scans STATE.employees[].periods
+// for any paystub whose stored employer taxes (ss_er, medicare_er, suta, ett,
+// futa) don't match what the current tax engine would compute for that
+// paystub's gross + running YTD context. Returns an array of anomaly objects,
+// each with the employee identifier, PP, and per-field delta.
+//
+// Motivation: on 2026-06-29 we found 13 paystubs imported from the original
+// Excel file with $0 for all 5 employer taxes. The individual-paystub
+// numbers drove Chris's biweekly deposits during Q1 and Q2, so he
+// under-deposited and had to pay balance-due at filing time. The Tax
+// Filings page recomputes these on the fly and was correct, but the
+// discrepancy between paystub data and expected data went undetected
+// for months. This function makes future occurrences visible within one
+// dashboard render.
+//
+// Uses the same math as calcEmployerTaxes (line ~6478). Threshold is
+// $0.01 to allow for float noise.
+function findEmployerTaxAnomalies() {
+  const anomalies = [];
+  const r = STATE.tax_rates || {};
+  const cap    = r.state_unemployment_wage_base || 7000;
+  const ssBase = r.ss_wage_base || 184500;
+  const ssErRate  = r.ss_er     != null ? r.ss_er     : 0.062;
+  const medErRate = r.medicare_er != null ? r.medicare_er : 0.0145;
+  const sutaRate  = r.suta      != null ? r.suta      : 0.034;
+  const ettRate   = r.ett       != null ? r.ett       : 0.001;
+  const futaRate  = r.futa      != null ? r.futa      : 0.006;
+
+  for (const emp of (STATE.employees || [])) {
+    if (!emp.periods || emp.periods.length === 0) continue;
+    // Sort ascending so YTD accumulates in real order.
+    const sorted = emp.periods.slice().sort((a, b) => (a.pp || 0) - (b.pp || 0));
+    // Track YTD gross by calendar year — cap resets Jan 1.
+    const ytdByYear = {};
+
+    for (const p of sorted) {
+      if (p.voided) continue;
+      const year = yearOfDate(p.end_date);
+      if (year == null) continue;
+      if (ytdByYear[year] == null) ytdByYear[year] = 0;
+      const priorYtd = ytdByYear[year];
+      const gross    = Number(p.gross_pay) || 0;
+
+      const remainUnemp  = Math.max(0, cap    - Math.min(priorYtd, cap));
+      const taxableUnemp = Math.min(gross, remainUnemp);
+      const remainSS     = Math.max(0, ssBase - Math.min(priorYtd, ssBase));
+      const taxableSS    = Math.min(gross, remainSS);
+
+      const expected = {
+        ss_er:       round2(taxableSS   * ssErRate),
+        medicare_er: round2(gross       * medErRate),
+        suta:        round2(taxableUnemp * sutaRate),
+        ett:         round2(taxableUnemp * ettRate),
+        futa:        round2(taxableUnemp * futaRate),
+      };
+
+      const actual = p.employer_taxes || {};
+      const deltas = {};
+      let hasAnomaly = false;
+      for (const k of Object.keys(expected)) {
+        const a = Number(actual[k]) || 0;
+        const e = expected[k];
+        const d = round2(a - e);
+        if (Math.abs(d) > 0.01) {
+          deltas[k] = { actual: a, expected: e, delta: d };
+          hasAnomaly = true;
+        }
+      }
+
+      if (hasAnomaly) {
+        anomalies.push({
+          employee_id: emp.employee_id || '(no code)',
+          name:        emp.name        || '(unnamed)',
+          pp:          p.pp,
+          end_date:    p.end_date,
+          gross,
+          deltas,
+        });
+      }
+
+      ytdByYear[year] += gross;
+    }
+  }
+  return anomalies;
+}
+
+// [ETC-1] Admin-only warning banner. Returns empty string when everything
+// looks correct — safe to interpolate unconditionally. Renders a red banner
+// with count + total delta when anomalies exist, and tells admin how to
+// inspect via DevTools console.
+function renderPaystubHealthWidget() {
+  if (currentUserRole !== 'admin') return '';
+  const anomalies = findEmployerTaxAnomalies();
+  if (anomalies.length === 0) return '';
+
+  const totalAbsDelta = anomalies.reduce((sum, a) => {
+    return sum + Object.values(a.deltas).reduce((s, d) => s + Math.abs(d.delta), 0);
+  }, 0);
+
+  return `
+    <div style="background:#fee2e2; border:1px solid #b91c1c; border-radius:8px; padding:16px 20px; margin-bottom:20px;">
+      <div style="font-weight:600; color:#7f1d1d; font-size:15px; margin-bottom:4px;">
+        ⚠ Paystub employer tax anomaly detected
+      </div>
+      <div style="font-size:13px; color:#7f1d1d; line-height:1.5;">
+        ${anomalies.length} paystub${anomalies.length === 1 ? '' : 's'} have stored employer taxes that don't match what the tax engine expects
+        (~${money(totalAbsDelta)} total absolute delta across all mismatches).
+        Open DevTools (F12) → Console → run <code style="background:#fecaca; padding:1px 4px; border-radius:3px;">console.table(findEmployerTaxAnomalies())</code> to see each affected paystub, or ping Claude to help write the fix SQL.
+      </div>
+    </div>
+  `;
+}
+
+// [ETC-1] Expose the anomaly detector to the DevTools console so the admin
+// can invoke it manually via `findEmployerTaxAnomalies()` from any page
+// even if the dashboard isn't currently rendered.
+if (typeof window !== 'undefined') {
+  window.findEmployerTaxAnomalies = findEmployerTaxAnomalies;
+}
+
+
 function renderDashboard() {
   // [E-2] Dispatcher: employees get a scoped dashboard showing only their
   // own numbers; admins get the full firm-wide view below.
@@ -3008,6 +3129,9 @@ function renderDashboard() {
     </div>
 
     ${renderDeadlineReminderBanner()}
+    <!-- [ETC-1] Silent when everything's healthy; shows red banner when
+         any paystub has stored employer taxes drifting from tax-engine expected. -->
+    ${renderPaystubHealthWidget()}
     ${renderCurrentPeriodWidget()}
     ${renderDraftProgressWidget()}
 
