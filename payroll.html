@@ -133,6 +133,14 @@
   /* Active stays a teal pill with white text — pops nicely on the light cream sidebar */
   .nav-item.active { background: var(--primary); color: white; }
   .nav-item .icon { width: 18px; text-align: center; opacity: .9; }
+  /* [POLISH-1] Inline SVG nav icons. Sized off the .icon span so the existing
+     18px slot and 10px flex gap are unchanged — swapping the ◆ glyph for an
+     <svg> doesn't shift any layout. currentColor means the icon inherits the
+     nav item's text color automatically, including the white .active state. */
+  .nav-item .icon svg { width: 18px; height: 18px; display: block; stroke: currentColor; stroke-width: 1.75; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  /* [POLISH-1] Left accent bar on the active item. Uses inset box-shadow
+     rather than border-left so it doesn't affect the box model / alignment. */
+  .nav-item.active { box-shadow: inset 3px 0 0 var(--primary-dark); }
   .nav-item.disabled { color: var(--sidebar-muted); cursor: not-allowed; opacity: 0.5; }
   .nav-item.disabled:hover { background: transparent; color: var(--sidebar-muted); }
   .soon-tag { margin-left: auto; font-size: 10px; background: var(--border); padding: 2px 6px; border-radius: 4px; color: var(--sidebar-muted); }
@@ -337,6 +345,34 @@
 
   /* ---------- Empty state ---------- */
   .empty { padding: 40px 22px; text-align: center; color: var(--muted); }
+
+  /* ---------- [POLISH-2] SUTA cap progress bar ----------
+     Replaces the plain text badge in the Dashboard "YTD by Employee" table
+     with a filled bar, so the distance to the $7,000 unemployment wage base
+     is readable at a glance instead of requiring mental subtraction.
+     Three colour states mirror the existing badge logic exactly:
+       accruing    → teal   (plenty of room)
+       approaching → gold   (>= 90% of cap)
+       reached     → gray   (no more SUTA/ETT/FUTA owed)
+     Fully presentational — the underlying capReached / capApproaching
+     booleans are unchanged. */
+  .cap-meter { min-width: 150px; }
+  .cap-meter-track { height: 7px; background: var(--border-soft); border-radius: 999px; overflow: hidden; }
+  .cap-meter-fill { height: 100%; border-radius: 999px; background: var(--primary); transition: width .4s cubic-bezier(.2,.7,.3,1); }
+  .cap-meter.approaching .cap-meter-fill { background: var(--accent); }
+  .cap-meter.reached .cap-meter-fill { background: var(--muted); }
+  .cap-meter-label { font-size: 11.5px; color: var(--muted); margin-top: 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .cap-meter.approaching .cap-meter-label { color: var(--accent-dark); font-weight: 500; }
+
+  /* ---------- [POLISH-3] Empty states ----------
+     Upgrades bare "No days yet" text to icon + headline + next-step line.
+     Rendered by the emptyState() helper. Works inside a <td colspan> as well
+     as a standalone <div>, so it drops into both table and panel contexts. */
+  .empty-state { padding: 34px 20px; text-align: center; }
+  .empty-state-icon { color: var(--border); }
+  .empty-state-icon svg { width: 26px; height: 26px; stroke: currentColor; stroke-width: 1.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .empty-state-title { font-size: 14.5px; color: var(--text); margin-top: 10px; font-weight: 500; }
+  .empty-state-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
 
   .view { display: none; }
   .view.active { display: block; }
@@ -1228,29 +1264,32 @@
          visible to both admins and employees. Employee views are scoped
          to the logged-in user (see renderEmployeeDashboard etc). Tax Filings
          and Settings remain admin-only. -->
-    <div class="nav-item active" data-view="dashboard"><span class="icon">◆</span> Dashboard</div>
-    <div class="nav-item" data-view="employees"><span class="icon">◆</span> Employees</div>
-    <div class="nav-item" data-view="run-payroll"><span class="icon">◆</span> Run Payroll</div>
-    <div class="nav-item" data-view="history"><span class="icon">◆</span> History</div>
+    <!-- [POLISH-1] Nav icons are inline SVG (no icon-font CDN dependency).
+         Only the glyph inside <span class="icon"> changed — every data-view
+         attribute, class, and handler binding is untouched. -->
+    <div class="nav-item active" data-view="dashboard"><span class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span> Dashboard</div>
+    <div class="nav-item" data-view="employees"><span class="icon"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/></svg></span> Employees</div>
+    <div class="nav-item" data-view="run-payroll"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span> Run Payroll</div>
+    <div class="nav-item" data-view="history"><span class="icon"><svg viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.8-6.3L3 8"/><path d="M3 3.5V8h4.5"/><path d="M12 8.5V12l2.5 1.5"/></svg></span> History</div>
     <!-- [RC-3] Receipts: visible to both admin and employee. Admin sees all
          receipts firm-wide; employee sees only their own (RLS-enforced). -->
-    <div class="nav-item" data-view="receipts"><span class="icon">◆</span> Receipts</div>
+    <div class="nav-item" data-view="receipts"><span class="icon"><svg viewBox="0 0 24 24"><path d="M4 3h16v18l-2.7-1.8L14.7 21 12 19.2 9.3 21l-2.6-1.8L4 21z"/><path d="M8 8h8M8 12h5"/></svg></span> Receipts</div>
     <!-- [PS-1] Total Paystub: per-period roll-up of all employees' paystubs.
          Admin-only — shows the whole org's pay for a single chosen period.
          Distinct from Tax Filings (quarterly) and Year-End (annual). -->
-    <div class="nav-item admin-only" data-view="pay-period-summary"><span class="icon">◆</span> Total Paystub</div>
-    <div class="nav-item admin-only" data-view="tax-filings"><span class="icon">◆</span> Tax Filings</div>
+    <div class="nav-item admin-only" data-view="pay-period-summary"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 3 3 7.5l9 4.5 9-4.5z"/><path d="M3 12.5 12 17l9-4.5"/><path d="M3 17 12 21.5 21 17"/></svg></span> Total Paystub</div>
+    <div class="nav-item admin-only" data-view="tax-filings"><span class="icon"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg></span> Tax Filings</div>
     <!-- [WG-3] Year-End: hosts W-2 forms and annual totals. Admin-only. -->
-    <div class="nav-item admin-only" data-view="year-end"><span class="icon">◆</span> Year-End</div>
+    <div class="nav-item admin-only" data-view="year-end"><span class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/></svg></span> Year-End</div>
     <!-- [AL-3] Activity Log: admin audit trail for paystub finalizes/edits/voids. -->
-    <div class="nav-item admin-only" data-view="activity-log"><span class="icon">◆</span> Activity Log</div>
+    <div class="nav-item admin-only" data-view="activity-log"><span class="icon"><svg viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4" cy="6" r="1.3"/><circle cx="4" cy="12" r="1.3"/><circle cx="4" cy="18" r="1.3"/></svg></span> Activity Log</div>
     <!-- [ERR-UI] Errors: review the client_errors table from inside the app
          instead of opening Supabase SQL Editor. Admin-only. -->
-    <div class="nav-item admin-only" data-view="errors"><span class="icon">◆</span> Errors</div>
+    <div class="nav-item admin-only" data-view="errors"><span class="icon"><svg viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4.5M12 17.5v.01"/></svg></span> Errors</div>
 
     <div class="nav-label">Setup</div>
-    <div class="nav-item admin-only" data-view="settings"><span class="icon">◆</span> Settings</div>
-    <div class="nav-item" data-view="tax-rates"><span class="icon">◆</span> Tax Rates</div>
+    <div class="nav-item admin-only" data-view="settings"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v2.6M12 19.4V22M4.2 4.2l1.9 1.9M17.9 17.9l1.9 1.9M2 12h2.6M19.4 12H22M4.2 19.8l1.9-1.9M17.9 6.1l1.9-1.9"/></svg></span> Settings</div>
+    <div class="nav-item" data-view="tax-rates"><span class="icon"><svg viewBox="0 0 24 24"><path d="M19 5 5 19"/><circle cx="7.5" cy="7.5" r="2.5"/><circle cx="16.5" cy="16.5" r="2.5"/></svg></span> Tax Rates</div>
 
     <div class="sidebar-footer">
       <div>Current pay period</div>
@@ -3016,6 +3055,34 @@ if (typeof window !== 'undefined') {
 }
 
 
+// [POLISH-3] Empty-state renderer. Turns a bare "No days yet" string into an
+// icon + headline + next-step line so blank tables read as intentional rather
+// than broken. Purely presentational — callers swap their placeholder string
+// for a call to this, nothing else changes.
+//
+// `iconKey` picks from EMPTY_STATE_ICONS below; an unknown key falls back to
+// the generic 'inbox' glyph so a typo degrades gracefully instead of throwing.
+// `sub` is optional — omit it for cases where the headline says enough.
+const EMPTY_STATE_ICONS = {
+  clock:    '<circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 1.8"/>',
+  route:    '<circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H15a3.5 3.5 0 0 0 0-7H9a3.5 3.5 0 0 1 0-7h6.5"/>',
+  receipt:  '<path d="M4 3h16v18l-2.7-1.8L14.7 21 12 19.2 9.3 21l-2.6-1.8L4 21z"/><path d="M8 8h8M8 12h5"/>',
+  archive:  '<rect x="3" y="4" width="18" height="4.5" rx="1"/><path d="M4.5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5V8.5"/><path d="M10 12.5h4"/>',
+  users:    '<path d="M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/>',
+  inbox:    '<path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M5.5 4h13l2.5 9v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5z"/>',
+};
+function emptyState(iconKey, title, sub) {
+  const paths = EMPTY_STATE_ICONS[iconKey] || EMPTY_STATE_ICONS.inbox;
+  const subLine = sub ? `<div class="empty-state-sub">${esc(sub)}</div>` : '';
+  return `
+    <div class="empty-state">
+      <div class="empty-state-icon"><svg viewBox="0 0 24 24">${paths}</svg></div>
+      <div class="empty-state-title">${esc(title)}</div>
+      ${subLine}
+    </div>`;
+}
+
+
 function renderDashboard() {
   // [E-2] Dispatcher: employees get a scoped dashboard showing only their
   // own numbers; admins get the full firm-wide view below.
@@ -3083,15 +3150,22 @@ function renderDashboard() {
     const t = ytdTotalsForYear(emp, currentYearForYtd);
     const capReached     = t.gross >= capBase;
     const capApproaching = !capReached && t.gross >= capApproachingThreshold;
-    let capBadge;
-    if (capReached) {
-      capBadge = '<span class="badge pending">$7k cap reached</span>';
-    } else if (capApproaching) {
-      const remaining = capBase - t.gross;
-      capBadge = `<span class="badge pending" title="Employer SUTA/ETT/FUTA taxes will stop once this employee crosses $${capBase.toLocaleString()} YTD gross.">Approaching cap — ${money(remaining)} to go</span>`;
-    } else {
-      capBadge = '<span class="badge active">Still accruing</span>';
-    }
+    // [POLISH-2] Render the cap state as a progress bar instead of a text
+    // badge. Same three states, same booleans — purely a display swap so the
+    // distance to the $7,000 wage base is legible at a glance.
+    const capPct   = Math.max(0, Math.min(100, (t.gross / capBase) * 100));
+    const capState = capReached ? 'reached' : (capApproaching ? 'approaching' : 'accruing');
+    const capLabel = capReached
+      ? 'At cap — no more SUTA/ETT/FUTA'
+      : `${money(capBase - t.gross)} to ${'$' + capBase.toLocaleString()} cap`;
+    const capTitle = capReached
+      ? `This employee has passed $${capBase.toLocaleString()} YTD gross, so no further SUTA/ETT/FUTA is owed for them this year.`
+      : `Employer SUTA/ETT/FUTA stop once this employee crosses $${capBase.toLocaleString()} YTD gross.`;
+    const capBadge = `
+      <div class="cap-meter ${capState}" title="${esc(capTitle)}">
+        <div class="cap-meter-track"><div class="cap-meter-fill" style="width:${capPct.toFixed(1)}%;"></div></div>
+        <div class="cap-meter-label">${esc(capLabel)}</div>
+      </div>`;
     return `
       <tr>
         <td>${renderEmployeeCell(emp)}</td>
@@ -3386,7 +3460,7 @@ function renderEmployees() {
             <th style="text-align:right">Actions</th>
           </tr>
         </thead>
-        <tbody>${rows || `<tr><td colspan="8" class="empty">No employees yet</td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="8">${emptyState('users', 'No employees yet', 'Use “+ Add Employee” above to add your first one.')}</td></tr>`}</tbody>
       </table>
     </div>
   `;
@@ -3570,7 +3644,11 @@ function renderHistory() {
           <thead>
             <tr><th>PP</th><th>End Date</th><th>Quarter</th><th style="text-align:right">Hours</th><th style="text-align:right">Gross</th><th style="text-align:right">Reimb.</th><th style="text-align:right">Taxes</th><th style="text-align:right">Net Pay</th><th></th></tr>
           </thead>
-          <tbody>${periodRows || `<tr><td colspan="9" class="empty">${historyShowVoided ? "No pay periods yet" : (voidedCount > 0 ? "All pay periods are voided \u2014 click 'Show voided' above to view them" : "No pay periods yet")}</td></tr>`}</tbody>
+          <tbody>${periodRows || `<tr><td colspan="9">${
+            (!historyShowVoided && voidedCount > 0)
+              ? emptyState('archive', 'All pay periods are voided', "Click \u201cShow voided\u201d above to view them.")
+              : emptyState('archive', 'No pay periods yet', 'Finalized paystubs will appear here.')
+          }</td></tr>`}</tbody>
         </table>
       </div>
     `;
@@ -6627,7 +6705,7 @@ function renderRunPayrollEntry(empId) {
               <th></th>
             </tr>
           </thead>
-          <tbody>${timeRows || `<tr><td colspan="5" class="empty">No days yet</td></tr>`}</tbody>
+          <tbody>${timeRows || `<tr><td colspan="5">${emptyState('clock', 'No days added yet', 'Use “+ Add day” below to log a shift.')}</td></tr>`}</tbody>
         </table>
         <button class="btn small" onclick="addDraftTime('${emp.id}')">+ Add day</button>
 
@@ -6643,7 +6721,7 @@ function renderRunPayrollEntry(empId) {
               <th></th>
             </tr>
           </thead>
-          <tbody>${mileageRows || `<tr><td colspan="5" class="empty">No trips yet</td></tr>`}</tbody>
+          <tbody>${mileageRows || `<tr><td colspan="5">${emptyState('route', 'No trips logged', 'Add a trip if you drove for work this period.')}</td></tr>`}</tbody>
         </table>
         <button class="btn small" onclick="addDraftMileage('${emp.id}')">+ Add trip</button>
 
@@ -6658,7 +6736,7 @@ function renderRunPayrollEntry(empId) {
               <th></th>
             </tr>
           </thead>
-          <tbody>${reimbRows || `<tr><td colspan="5" class="empty">No expenses yet</td></tr>`}</tbody>
+          <tbody>${reimbRows || `<tr><td colspan="5">${emptyState('receipt', 'No expenses logged', 'Add any out-of-pocket costs to be reimbursed.')}</td></tr>`}</tbody>
         </table>
         <button class="btn small" onclick="addDraftReimb('${emp.id}')">+ Add expense</button>
 
