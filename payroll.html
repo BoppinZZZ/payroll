@@ -41,7 +41,22 @@
      for status indicators but warms them to harmonize with the new neutrals. */
   :root {
     /* ---- Surfaces ---- */
-    --bg: #FBF9F6;              /* warm cream — main page background */
+    --bg: #FBF9F6;              /* warm cream — recessed surfaces INSIDE cards
+                                   (table headers, modal footers, button hovers,
+                                   summary rows). Deliberately NOT the page
+                                   canvas — see --page-top / --page-base below. */
+
+    /* [POLISH-4] Page canvas. Split out from --bg because --bg is reused by
+       ~20 recessed surfaces nested inside white cards; deepening --bg would
+       darken all of them too. These two tokens drive only the page background
+       gradient, so the canvas can go deeper while everything inside cards
+       stays exactly as it was.
+       The falloff is expressed in px (not %) so it completes near the top of
+       the page regardless of content height — a short Settings page and a long
+       History page get the same look, and no background-attachment:fixed is
+       needed (which costs scroll perf on mobile). */
+    --page-top:  #F2EBDD;       /* warmer cream at the very top of the page */
+    --page-base: #FAF7F1;       /* settles to this below the falloff */
     --panel: #FFFFFF;           /* white — cards, panels, modals */
     --border: #E7E2D8;          /* warm cream-gray border */
     --border-soft: #EFEBE3;     /* even softer for subtle dividers */
@@ -82,7 +97,13 @@
      figures via font-variant-numeric so columns align to the pixel. */
   html, body {
     height: 100%;
-    background: var(--bg); color: var(--text);
+    /* [POLISH-4] Page canvas: solid --page-base with a short warm falloff from
+       --page-top at the very top. Deeper than the old flat #FBF9F6 so the white
+       panels/cards actually separate from the page instead of blending into it. */
+    background-color: var(--page-base);
+    background-image: linear-gradient(180deg, var(--page-top) 0px, var(--page-base) 420px);
+    background-repeat: no-repeat;
+    color: var(--text);
     font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     font-size: 16px; -webkit-font-smoothing: antialiased;
     font-feature-settings: 'kern' 1, 'liga' 1;
@@ -91,11 +112,16 @@
 
   /* ---------- Hydrating overlay (polish: loading state during hydrate) ---------- */
   /* Full-page curtain shown between sign-in and hydrate-complete. Covers the
-     empty-dashboard flash that used to be visible during cloud fetch. The
-     background matches --bg so transition in/out is seamless. */
+     empty-dashboard flash that used to be visible during cloud fetch.
+     [POLISH-4] Mirrors the page canvas gradient exactly so the curtain lifting
+     is still seamless. The overlay is position:fixed (viewport-anchored) while
+     the body gradient is document-anchored — they line up because this overlay
+     only ever shows during initial hydrate, when scroll position is 0. */
   .hydrating-overlay {
     position: fixed; inset: 0;
-    background: var(--bg);
+    background-color: var(--page-base);
+    background-image: linear-gradient(180deg, var(--page-top) 0px, var(--page-base) 420px);
+    background-repeat: no-repeat;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     gap: 16px;
@@ -269,7 +295,11 @@
   /* ---------- Stat cards ---------- */
   .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
   /* [R-3] Stat cards: more breathing room (22px), slightly larger radius (14px). */
-  .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px 24px; }
+  /* [POLISH-4] Two-layer shadow — a tight contact shadow plus a wider diffuse
+     one — so white cards read as sitting above the deepened page canvas.
+     Warm-tinted (matches --text) rather than pure black so it doesn't grey out
+     the cream palette. */
+  .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px 24px; box-shadow: 0 1px 2px rgba(28,25,23,.04), 0 6px 16px rgba(28,25,23,.055); }
   .stat-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
   .stat-value { font-size: 28px; font-weight: 500; margin-top: 8px; font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
   .stat-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
@@ -280,7 +310,7 @@
 
   /* ---------- Panel ---------- */
   /* [R-3] Panels: slightly larger radius (14px), more generous padding. */
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 24px; overflow: hidden; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 24px; overflow: hidden; box-shadow: 0 1px 2px rgba(28,25,23,.04), 0 6px 16px rgba(28,25,23,.055); }
   .panel-header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   .panel-title { font-family: 'IBM Plex Serif', Georgia, serif; font-size: 17px; font-weight: 500; letter-spacing: -0.005em; }
   .panel-sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
@@ -541,6 +571,10 @@
 
   @media print {
     body { background: white; }
+    /* [POLISH-4] Strip the on-screen card elevation for print. The `background:
+       white` shorthand above already resets the page gradient; these two rules
+       drop the matching shadows so printed reports stay flat and ink-cheap. */
+    .panel, .stat-card { box-shadow: none !important; }
     .sidebar, .page-header, .notice, .company-liability { display: none !important; }
     .app { grid-template-columns: 1fr; }
     .main { padding: 0; }
