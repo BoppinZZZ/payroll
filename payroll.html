@@ -164,9 +164,11 @@
      <svg> doesn't shift any layout. currentColor means the icon inherits the
      nav item's text color automatically, including the white .active state. */
   .nav-item .icon svg { width: 18px; height: 18px; display: block; stroke: currentColor; stroke-width: 1.75; fill: none; stroke-linecap: round; stroke-linejoin: round; }
-  /* [POLISH-1] Left accent bar on the active item. Uses inset box-shadow
-     rather than border-left so it doesn't affect the box model / alignment. */
-  .nav-item.active { box-shadow: inset 3px 0 0 var(--primary-dark); }
+  /* [POLISH-1] No extra active indicator here on purpose. An earlier revision
+     added an inset left bar in --primary-dark, but the active item's background
+     is already --primary (teal), so dark-teal-on-teal was invisible. The solid
+     teal fill plus white text (rule above) is a clear enough active state on
+     its own. */
   .nav-item.disabled { color: var(--sidebar-muted); cursor: not-allowed; opacity: 0.5; }
   .nav-item.disabled:hover { background: transparent; color: var(--sidebar-muted); }
   .soon-tag { margin-left: auto; font-size: 10px; background: var(--border); padding: 2px 6px; border-radius: 4px; color: var(--sidebar-muted); }
@@ -683,6 +685,14 @@
   .rpp-status.not-started { background: var(--border-soft); color: var(--muted); }
   .rpp-status.in-progress { background: var(--amber-soft); color: var(--amber); }
   .rpp-status.finalized   { background: var(--green-soft); color: var(--green); }
+  /* [NOHRS-5] Deliberately neutral, not green — "no hours" is a resolved state
+     but nothing was paid, so it shouldn't read as a completed payroll run. */
+  .rpp-status.no-hours    { background: var(--purple-soft); color: var(--purple); }
+  /* [NOHRS-5] Small secondary action on the picker card. Sits inside a card
+     that is itself clickable, so its handler calls stopPropagation. */
+  .rpp-nohours-btn { font-size: 11.5px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: white; color: var(--muted); cursor: pointer; font-family: inherit; white-space: nowrap; transition: all .15s ease; }
+  .rpp-nohours-btn:hover { border-color: var(--muted); color: var(--text); }
+  .rpp-nohours-btn:disabled { opacity: .5; cursor: default; }
   .rpp-card-arrow { color: var(--muted); font-size: 18px; }
   .rpp-entry-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding: 12px 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
   .rpp-breadcrumb { font-size: 13px; color: var(--muted); cursor: pointer; background: none; border: none; padding: 0; font-family: inherit; }
@@ -708,6 +718,9 @@
   .cpw-emp-status.not-started { background: var(--border-soft); color: var(--muted); }
   .cpw-emp-status.in-progress { background: var(--amber-soft); color: var(--amber); }
   .cpw-emp-status.finalized { background: var(--green-soft); color: var(--green); }
+  /* [NOHRS-7] Matches the picker's no-hours pill. Neutral purple rather than
+     green — resolved, but nobody was paid. */
+  .cpw-emp-status.no-hours { background: var(--purple-soft); color: var(--purple); }
 
   /* ---------- [DPW-1] Draft Progress Widget (Dashboard) ----------
      Removable: delete this entire block, the renderDraftProgressWidget()
@@ -2717,7 +2730,10 @@ function renderCurrentPeriodWidget() {
 
   // Per-employee rows (avatar + name on left, status pill on right)
   const empRows = empData.map(({ emp, status }) => {
+    // [NOHRS-7] "No hours" reads as a resolved state so the admin isn't left
+    // wondering why a period closed with someone showing "Not started".
     const label = status === "finalized" ? "Finalized"
+                : status === "no_hours" ? "No hours"
                 : status === "in_progress" ? "In progress"
                 : "Not started";
     const cls = status.replace("_", "-");
@@ -2839,13 +2855,26 @@ function renderDraftProgressWidget() {
 
     const totalRows = teRows.length + meRows.length + reRows.length;
     if (totalRows === 0) {
+      // [NOHRS-7] Distinguish "admin confirmed zero hours" from "hasn't entered
+      // anything yet". Both show no rows, but only the second one is something
+      // to chase before closing the period.
+      // [NOHRS-7b] Also require draftEntryHasData to be false, matching
+      // hasNoHoursAck. This widget's own row filters are stricter than that
+      // helper — they need BOTH clocks on a time row, while draftEntryHasData
+      // counts either one. A half-typed row would otherwise land here with
+      // totalRows === 0 and print "confirmed" while the picker correctly
+      // showed "In progress". Same predicate everywhere avoids that.
+      const ackd = !!(entry && entry.no_hours_ack) && !draftEntryHasData(entry);
+      const emptyLabel = ackd
+        ? '<span style="color:var(--purple);">No hours this period — confirmed</span>'
+        : 'Nothing entered yet';
       return `
         <div class="dpw-emp-row empty">
           <div class="dpw-emp-name">
             <div class="avatar">${esc(emp.avatar)}</div>
             <div>
               <div class="dpw-emp-label">${esc(emp.name)}${!emp.profile_id ? ' <span class="badge" style="background:var(--border); color:var(--muted); font-size:10px; margin-left:6px;" title="This employee has not been linked to a sign-in account yet.">Not yet invited</span>' : ''}</div>
-              <div class="dpw-emp-counts">Nothing entered yet</div>
+              <div class="dpw-emp-counts">${emptyLabel}</div>
             </div>
           </div>
         </div>`;
@@ -5227,7 +5256,10 @@ function getDraft() {
           time_entries: generatePeriodDays(STATE.current_period.start, STATE.current_period.end)
             .map(date => ({ date, clock_in: "", clock_out: "", notes: "" })),
           mileage_entries: [],
-          reimbursements: []
+          reimbursements: [],
+          // [NOHRS-3] Default false on locally-created entries so every entry
+          // object carries the field, matching what toAppState produces.
+          no_hours_ack: false
         };
       }
     });
@@ -5240,7 +5272,9 @@ function getDraft() {
     entries[emp.id] = {
       time_entries: days.map(date => ({ date, clock_in: "", clock_out: "", notes: "" })),
       mileage_entries: [],
-      reimbursements: []
+      reimbursements: [],
+      // [NOHRS-3] See note above — keep the field present on every entry.
+      no_hours_ack: false
     };
   });
   STATE.draft_period = {
@@ -6500,17 +6534,288 @@ function draftEntryHasData(entry) {
   return false;
 }
 
+// ============================================================================
+// [NOHRS-4] "No hours this period" — mark / undo
+// ----------------------------------------------------------------------------
+// Lets an admin record that an employee genuinely worked zero hours in a pay
+// period, so the period can roll over without a paystub for them.
+//
+// Why this exists: allEmployeesFinalizedForCurrentPP() requires every employee
+// to have an active paystub before rollover. An employee with no hours has
+// nothing to finalize, which strands the period — the only workaround was
+// calling rolloverToNextPeriod() from the console, which skips every check.
+//
+// Why it's an explicit mark rather than "ignore empty timesheets": an empty
+// timesheet is ambiguous between "worked zero hours" and "forgot to enter
+// time". Silently skipping empties would have rolled right past the real
+// situation on 2026-09-19, where Annie had worked four days and only two had
+// reached the cloud. This records a deliberate decision instead of inferring
+// one from absence.
+//
+// No paystub is created. A zero-dollar paystub would clutter History and could
+// put an employee on the DE 9C quarterly wage detail with $0 wages, which is
+// not correct reporting.
+// ============================================================================
+async function markNoHours(employeeId, btnEl) {
+  if (!requireAdmin('Mark no hours')) return;
+
+  const emp = STATE.employees.find(e => e.id === employeeId);
+  if (!emp) { showToast('Employee not found.', 'error'); return; }
+
+  const cp = STATE.current_period;
+  if (!cp) { showToast('No current pay period loaded. Refresh and try again.', 'error'); return; }
+
+  const draft = getDraft();
+  const entry = draft.entries[employeeId];
+
+  // Guard: refuse when there IS data. Marking someone as no-hours while they
+  // have entered time would skip a paystub they're owed. Admin must finalize
+  // normally, or clear the rows first if they were entered in error.
+  if (draftEntryHasData(entry)) {
+    const te = (entry.time_entries || []).filter(t => (t.clock_in || '').trim() || (t.clock_out || '').trim()).length;
+    const me = (entry.mileage_entries || []).filter(m => Number(m.miles) > 0).length;
+    const re = (entry.reimbursements || []).filter(r => reimbRowState(r) !== 'empty').length;
+    const bits = [];
+    if (te) bits.push(`${te} time entr${te === 1 ? 'y' : 'ies'}`);
+    if (me) bits.push(`${me} mileage row${me === 1 ? '' : 's'}`);
+    if (re) bits.push(`${re} reimbursement row${re === 1 ? '' : 's'}`);
+    showToast(
+      `${emp.name} has ${bits.join(', ')} entered for PP${cp.pp} — can't mark as no hours. ` +
+      `Finalize the paystub normally, or clear those rows first if they were entered by mistake.`,
+      'error',
+      9000
+    );
+    return;
+  }
+
+  // Already has a paystub? Then "no hours" is the wrong action entirely.
+  if (emp.periods.some(p => p.pp === cp.pp && isPaystubActive(p))) {
+    showToast(`${emp.name} already has a finalized paystub for PP${cp.pp}.`, 'warning', 6000);
+    return;
+  }
+
+  if (!confirm(
+    `Mark ${emp.name} as having worked NO HOURS for PP${cp.pp}?\n\n` +
+    `• No paystub will be created for them this period\n` +
+    `• PP${cp.pp} will be free to close once everyone else is finalized\n` +
+    `• This is recorded with your name and the current time\n\n` +
+    `Only do this if they genuinely did not work. You can undo it afterward.`
+  )) return;
+
+  const reset = setButtonLoading(btnEl, 'Saving…');
+  try {
+    // [NOHRS-4b] Re-check the CLOUD before writing. The guard above reads this
+    // tab's in-memory STATE, which was populated at page load — if the employee
+    // entered time from their own device since then, this admin's copy still
+    // looks empty and the guard would wave it through. Same stale-admin-state
+    // family as the multi-tab issues documented in syncDraftToCloud.
+    //
+    // One extra round trip on a rarely-used action, in exchange for not
+    // skipping a paystub someone is owed. Reuses getDraftData so there's no
+    // second query shape to keep in step with the schema.
+    const cloud = await DAL.getDraftData(cp.pay_period_id);
+    if (cloud) {
+      const myTs = (cloud.timesheets || []).find(t => t.employee_id === employeeId);
+      if (myTs) {
+        const nTe = (cloud.timeEntries    || []).filter(x => x.timesheet_id === myTs.id).length;
+        const nMe = (cloud.mileageEntries || []).filter(x => x.timesheet_id === myTs.id).length;
+        const nRe = (cloud.reimbursements || []).filter(x => x.timesheet_id === myTs.id).length;
+        if (nTe + nMe + nRe > 0) {
+          const bits = [];
+          if (nTe) bits.push(`${nTe} time entr${nTe === 1 ? 'y' : 'ies'}`);
+          if (nMe) bits.push(`${nMe} mileage row${nMe === 1 ? '' : 's'}`);
+          if (nRe) bits.push(`${nRe} reimbursement row${nRe === 1 ? '' : 's'}`);
+          reset();
+          showToast(
+            `${emp.name} has ${bits.join(', ')} saved in the cloud for PP${cp.pp} — probably entered after this page loaded. ` +
+            `Nothing was changed. Refresh (Ctrl+Shift+R) to see their data, then finalize normally.`,
+            'error',
+            10000
+          );
+          return;
+        }
+      }
+    }
+
+    await DAL.setNoHoursAck(employeeId, cp.pay_period_id, true, currentUserId);
+    // Mirror into STATE so the UI reflects it without a full rehydrate.
+    if (entry) entry.no_hours_ack = true;
+    saveState(STATE);
+
+    // [NOHRS-6] Rollover check. The finalize flow has its own copy of this at
+    // the end of finalizePP, but marking no-hours is the other way a period can
+    // become fully resolved — and it's the likely last step, since the admin
+    // finalizes everyone who worked and then clears the one who didn't. Without
+    // this, Josh gets marked and the period still sits there.
+    const ppJustResolved = cp.pp;
+    if (allEmployeesFinalizedForCurrentPP()) {
+      try {
+        // [NOHRS-6c] Same cloud re-check as the finalize path. Covers the
+        // case where a DIFFERENT employee was acknowledged earlier and has
+        // since entered time — marking this one shouldn't close the period
+        // over them.
+        const ackCheck = await noHoursAcksStillValid();
+        if (!ackCheck.ok) {
+          const who = ackCheck.offenders.join(', ');
+          showToast(
+            `${emp.name} marked as no hours. Period NOT closed: ${who} ${ackCheck.offenders.length === 1 ? 'is' : 'are'} also marked as no hours but ` +
+            `now ${ackCheck.offenders.length === 1 ? 'has' : 'have'} time entered. Refresh (Ctrl+Shift+R) and finalize ${ackCheck.offenders.length === 1 ? 'them' : 'each of them'} normally.`,
+            'warning',
+            11000
+          );
+          render();
+          return;
+        }
+        const next = await rolloverToNextPeriod();
+        showToast(
+          `${emp.name} marked as no hours. PP${ppJustResolved} is complete — advanced to PP${next.pp} (${formatDate(next.start)} – ${formatDate(next.end)}).`,
+          'success',
+          6000
+        );
+      } catch (rollErr) {
+        // The acknowledgment itself saved fine; only the period advance failed.
+        // Say so explicitly so the admin doesn't re-click and double-apply.
+        console.error('[NOHRS-6] rollover after markNoHours failed:', rollErr);
+        logError('rollover-after-no-hours', rollErr, {
+          employee_id: employeeId,
+          pp: ppJustResolved,
+          pay_period_id: cp.pay_period_id,
+        });
+        showToast(
+          `${emp.name} was marked as no hours and saved. But closing PP${ppJustResolved} failed — ` +
+          `${rollErr.message || 'unknown error'}. Refresh and finalize again to retry the period close.`,
+          'warning',
+          9000
+        );
+      }
+    } else {
+      showToast(`${emp.name} marked as no hours for PP${ppJustResolved}.`, 'success');
+    }
+    render();
+  } catch (err) {
+    console.error('[NOHRS-4] markNoHours failed:', err);
+    showToast(`Couldn't save: ${err.message || err}`, 'error', 8000);
+    reset();
+  }
+}
+
+// Undo path. Deliberately has no data guard — clearing the mark is always safe,
+// it just puts the employee back to blocking rollover until they're finalized.
+async function undoNoHours(employeeId, btnEl) {
+  if (!requireAdmin('Undo no hours')) return;
+
+  const emp = STATE.employees.find(e => e.id === employeeId);
+  if (!emp) { showToast('Employee not found.', 'error'); return; }
+  const cp = STATE.current_period;
+  if (!cp) { showToast('No current pay period loaded. Refresh and try again.', 'error'); return; }
+
+  const reset = setButtonLoading(btnEl, 'Saving…');
+  try {
+    await DAL.setNoHoursAck(employeeId, cp.pay_period_id, false, currentUserId);
+    const entry = getDraft().entries[employeeId];
+    if (entry) entry.no_hours_ack = false;
+    saveState(STATE);
+    showToast(`${emp.name} is back to needing a paystub for PP${cp.pp}.`, 'success');
+    render();
+  } catch (err) {
+    console.error('[NOHRS-4] undoNoHours failed:', err);
+    showToast(`Couldn't save: ${err.message || err}`, 'error', 8000);
+    reset();
+  }
+}
+
+// [NOHRS-4] Convenience reader used by the picker, the entry page, the
+// dashboard widgets, and the rollover gate. Centralized so the four callers
+// can't drift apart the way the reimbursement filters did before REIMB-STATE.
+function hasNoHoursAck(emp) {
+  if (!emp || !STATE.draft_period || !STATE.current_period) return false;
+  if (STATE.draft_period.pp !== STATE.current_period.pp) return false;
+  const entry = (STATE.draft_period.entries || {})[emp.id];
+  if (!entry || !entry.no_hours_ack) return false;
+
+  // [NOHRS-6b] A STALE acknowledgment must never outrank real data.
+  //
+  // markNoHours refuses to set the flag while data exists, but nothing stops
+  // data arriving AFTERWARD — the employee is marked as no-hours on Monday,
+  // then enters time on Wednesday. The draft sync writes their rows and never
+  // touches no_hours_ack, so without this check the flag would still say
+  // "resolved": the rollover gate would count them done, the period would
+  // close on the next finalize, and that employee would go unpaid with nothing
+  // on screen to suggest anything was wrong.
+  //
+  // Treating the ack as void whenever data is present means the live data
+  // always wins. The flag in the database is left alone — if the rows are
+  // later removed, the acknowledgment becomes effective again on its own.
+  // Because the gate, the status pill, and both buttons all read through this
+  // one function, that single rule covers every surface at once.
+  if (draftEntryHasData(entry)) return false;
+
+  return true;
+}
+
+// [NOHRS-6c] Cloud re-check of every live no-hours acknowledgment, run
+// immediately before a period is allowed to close.
+//
+// hasNoHoursAck above compares the flag against THIS TAB'S in-memory draft.
+// That's enough while the page is fresh, but STATE is only rehydrated on
+// sign-in and page load — a tab left open all afternoon never sees rows the
+// employee added from their own device in the meantime. In that window the
+// admin's copy looks empty, the stale ack reads as "resolved", and finalizing
+// the last other employee would close the period over someone who did work.
+//
+// So before the period actually closes we go back to the database and confirm
+// each acknowledged employee really still has nothing. Only acknowledged
+// employees are checked, and only when a rollover is imminent, so this costs
+// one request on the rare action rather than on every render.
+//
+// Returns { ok: true } or { ok: false, offenders: [name, …] }. Throws only if
+// the fetch itself fails — callers treat that as "don't roll over", because
+// closing a period on unverified data is the outcome worth avoiding.
+async function noHoursAcksStillValid() {
+  const cp = STATE.current_period;
+  if (!cp || !cp.pay_period_id) return { ok: true };
+
+  // Deliberately NOT filtered on emp.active. allEmployeesFinalizedForCurrentPP
+  // doesn't filter on it either, so an inactive-but-acknowledged employee would
+  // be counted "resolved" by the gate while being skipped here — the check must
+  // cover at least everything the gate does.
+  const acked = (STATE.employees || []).filter(e => hasNoHoursAck(e));
+  if (acked.length === 0) return { ok: true };
+
+  const cloud = await DAL.getDraftData(cp.pay_period_id);
+  const offenders = [];
+  for (const emp of acked) {
+    const ts = ((cloud && cloud.timesheets) || []).find(t => t.employee_id === emp.id);
+    if (!ts) continue;  // no timesheet row at all — genuinely nothing entered
+    const n =
+      ((cloud.timeEntries    || []).filter(x => x.timesheet_id === ts.id).length) +
+      ((cloud.mileageEntries || []).filter(x => x.timesheet_id === ts.id).length) +
+      ((cloud.reimbursements || []).filter(x => x.timesheet_id === ts.id).length);
+    if (n > 0) offenders.push(emp.name);
+  }
+  return offenders.length ? { ok: false, offenders } : { ok: true };
+}
+
+
 // ---------- Employee status for STATE.current_period (used by the dashboard widget) ----------
-// Returns one of: "finalized" | "in_progress" | "not_started".
+// Returns one of: "finalized" | "no_hours" | "in_progress" | "not_started".
 // - "finalized" — emp has an active (non-voided) paystub for the current PP.
+// - "no_hours" — [NOHRS-5] admin confirmed they worked zero hours this period.
 // - "in_progress" — the existing draft for the current PP has any data for this emp.
-// - "not_started" — neither of the above.
+// - "not_started" — none of the above.
 // Reads STATE.draft_period directly (does NOT call getDraft) so it has no side effects.
+//
+// [NOHRS-5] Order matters: "finalized" outranks "no_hours" because a paystub is
+// the stronger fact — if one somehow exists alongside the mark, the paystub is
+// what actually got paid. "no_hours" outranks "in_progress"/"not_started"
+// because markNoHours refuses to set the flag when data exists, so the two
+// can't legitimately coexist.
 function currentPeriodEmployeeStatus(emp) {
   const cp = STATE.current_period;
   if (!emp || !cp) return "not_started";
   const finalized = emp.periods.some(p => p.pp === cp.pp && isPaystubActive(p));
   if (finalized) return "finalized";
+  if (hasNoHoursAck(emp)) return "no_hours";
   const draft = STATE.draft_period;
   if (draft && draft.pp === cp.pp && draft.entries && draftEntryHasData(draft.entries[emp.id])) {
     return "in_progress";
@@ -6557,12 +6862,30 @@ function renderRunPayrollPicker() {
     const status = currentPeriodEmployeeStatus(emp);
     const statusBadge =
       status === 'finalized'   ? `<span class="rpp-status finalized">Finalized</span>` :
+      status === 'no_hours'    ? `<span class="rpp-status no-hours">No hours</span>` :
       status === 'in_progress' ? `<span class="rpp-status in-progress">In progress</span>` :
                                  `<span class="rpp-status not-started">Not started</span>`;
+
+    // [NOHRS-5] Admin-only "No hours" control. Shown for employees who are
+    // neither finalized nor already marked; the undo control replaces it once
+    // marked. stopPropagation keeps the click off the card's own onclick,
+    // which would navigate away to the entry page.
+    let noHoursBtn = '';
+    if (currentUserRole === 'admin') {
+      if (status === 'no_hours') {
+        noHoursBtn = `<button class="rpp-nohours-btn" onclick="event.stopPropagation(); undoNoHours('${emp.id}', this)" title="Undo — ${esc(emp.name)} will need a paystub for PP${cp.pp} again">Undo no hours</button>`;
+      } else if (status !== 'finalized') {
+        noHoursBtn = `<button class="rpp-nohours-btn" onclick="event.stopPropagation(); markNoHours('${emp.id}', this)" title="Record that ${esc(emp.name)} worked zero hours in PP${cp.pp}. No paystub is created. Blocked if they have any time, mileage, or reimbursement data entered.">No hours</button>`;
+      }
+    }
+
     return `
       <div class="rpp-card" onclick="selectRunPayrollEmployee('${emp.id}')" title="Open ${esc(emp.name)}'s pay entry">
         <div class="rpp-card-top">${renderEmployeeCell(emp)}</div>
-        <div class="rpp-card-meta">${statusBadge}<span class="rpp-card-arrow">→</span></div>
+        <div class="rpp-card-meta">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">${statusBadge}${noHoursBtn}</div>
+          <span class="rpp-card-arrow">→</span>
+        </div>
       </div>`;
   }).join("");
 
@@ -6787,6 +7110,18 @@ function renderRunPayrollEntry(empId) {
         </div>
 
         <div class="finalize-bar">
+          ${(function () {
+            // [NOHRS-5] Second home for the no-hours control, for the common
+            // path where the admin opens the employee's page, sees it empty,
+            // and wants to resolve it without going back to the picker.
+            if (currentUserRole !== 'admin') return '';
+            const st = currentPeriodEmployeeStatus(emp);
+            if (st === 'finalized') return '';
+            if (st === 'no_hours') {
+              return `<button class="btn" onclick="undoNoHours('${emp.id}', this)" title="Undo — ${esc(emp.name)} will need a paystub for this period again">Undo “no hours”</button>`;
+            }
+            return `<button class="btn" onclick="markNoHours('${emp.id}', this)" title="Record that ${esc(emp.name)} worked zero hours this period. No paystub is created. Blocked if any data is entered above.">No hours this period</button>`;
+          })()}
           <button class="btn primary" onclick="showPreview('${emp.id}')">Calculate &amp; Preview Paystub →</button>
         </div>
 
@@ -7899,6 +8234,27 @@ async function finalizePP(employeeId, btnEl) {
     );
   } else if (allEmployeesFinalizedForCurrentPP()) {
     try {
+      // [NOHRS-6c] Last check before the period closes: confirm every
+      // no-hours acknowledgment is still true against the database, not just
+      // against this tab's possibly-stale copy. An employee who was marked as
+      // no-hours and has since entered time from their own device must stop
+      // the rollover, or the period would close over wages they're owed.
+      //
+      // Only runs when at least one employee is acknowledged, so the normal
+      // "everyone finalized" path is unchanged.
+      const ackCheck = await noHoursAcksStillValid();
+      if (!ackCheck.ok) {
+        const who = ackCheck.offenders.join(', ');
+        showToast(
+          `PP${justFinalizedPP} finalized for ${justFinalizedName} — net ${money(justFinalizedNet)}. ` +
+          `Period NOT closed: ${who} ${ackCheck.offenders.length === 1 ? 'was' : 'were'} marked as no hours but now ` +
+          `${ackCheck.offenders.length === 1 ? 'has' : 'have'} time entered. Refresh (Ctrl+Shift+R), then finalize ${ackCheck.offenders.length === 1 ? 'them' : 'each of them'} normally.`,
+          'warning',
+          11000
+        );
+        // rolledOver stays false — fall through to viewPaystub below.
+        // The paystub just saved is unaffected.
+      } else {
       const next = await rolloverToNextPeriod();
       rolledOver = true;
       // [TN-2] Success: full period closed + advanced.
@@ -7907,6 +8263,7 @@ async function finalizePP(employeeId, btnEl) {
         'success',
         6000  // longer so user can read the rollover detail
       );
+      }
     } catch (err) {
       console.error('[4f-9] rolloverToNextPeriod failed:', err);
       // [TN-2] Partial success — paystub saved but rollover failed. Use error
@@ -7997,8 +8354,17 @@ function allEmployeesFinalizedForCurrentPP() {
   // This mirrors the empty-roster guard above.
   if (relevantEmps.length === 0) return false;
 
+  // [NOHRS-6] An employee is "resolved" for this period when EITHER they have
+  // an active paystub, OR an admin explicitly marked them as having worked zero
+  // hours (see markNoHours).
+  //
+  // The second condition is deliberately an explicit acknowledgment rather than
+  // "has no draft data". An empty timesheet is ambiguous — on 2026-09-19 it
+  // meant "Annie worked four days and only two synced", not "Annie worked
+  // zero". Requiring a recorded decision keeps the forgot-to-enter case
+  // blocking rollover, which is the whole point of this gate.
   return relevantEmps.every(emp =>
-    emp.periods.some(p => p.pp === pp && isPaystubActive(p))
+    emp.periods.some(p => p.pp === pp && isPaystubActive(p)) || hasNoHoursAck(emp)
   );
 }
 
@@ -12978,9 +13344,12 @@ const DAL = {
     if (!payPeriodId || typeof payPeriodId !== 'string') return empty;
 
     // First fetch timesheets for the period. If none exist, no drafts to load.
+    // [NOHRS-2] no_hours_ack rides along with the timesheet row so the picker,
+    // the dashboard widgets, and the rollover gate can all read it without an
+    // extra round trip.
     const { data: timesheets, error: tsErr } = await supabaseClient
       .from('timesheets')
-      .select('id, employee_id, pay_period_id')
+      .select('id, employee_id, pay_period_id, no_hours_ack')
       .eq('pay_period_id', payPeriodId);
     if (tsErr) {
       console.error('DAL.getDraftData timesheets error:', tsErr);
@@ -13017,6 +13386,48 @@ const DAL = {
       mileageEntries: meRes.data || [],
       reimbursements: reRes.data || [],
     };
+  },
+
+
+  // ---- [NOHRS-2] WRITER: setNoHoursAck ------------------------------------
+  // Mark (or unmark) an employee as having worked zero hours in a pay period.
+  //
+  // Upserts on the timesheets (employee_id, pay_period_id) unique constraint,
+  // which matters because the employee may have NO timesheet row at all — if
+  // they never opened the app for this period, nothing created one. Josh had
+  // no PP19 or PP20 row, which is exactly the case this feature exists for.
+  //
+  // onConflict names the unique pair so an existing row is updated in place
+  // rather than erroring, letting this double as the undo path.
+  //
+  // Returns the resulting row. Throws on failure so the caller can toast it.
+  async setNoHoursAck(employeeId, payPeriodId, ack, actorUserId) {
+    if (!employeeId)   throw new Error('setNoHoursAck: employeeId required');
+    if (!payPeriodId)  throw new Error('setNoHoursAck: payPeriodId required');
+    if (window.location.protocol === 'file:') return null;  // Dev mode no-op
+
+    const row = {
+      employee_id:     employeeId,
+      pay_period_id:   payPeriodId,
+      no_hours_ack:    !!ack,
+      // Stamp who/when on set; clear both on undo so a stale actor isn't left
+      // behind on a row that is no longer acknowledged.
+      no_hours_ack_at: ack ? new Date().toISOString() : null,
+      no_hours_ack_by: ack ? (actorUserId || null)    : null,
+      updated_at:      new Date().toISOString(),
+    };
+
+    const { data, error } = await supabaseClient
+      .from('timesheets')
+      .upsert(row, { onConflict: 'employee_id,pay_period_id' })
+      .select('id, employee_id, pay_period_id, no_hours_ack')
+      .single();
+
+    if (error) {
+      console.error('DAL.setNoHoursAck error:', error);
+      throw error;
+    }
+    return data;
   },
 
 
@@ -13704,6 +14115,9 @@ const DAL = {
               // URL each time it needs to display/download the file.
               receipt_file_path:  r.receipt_file_path || null,
             })),
+            // [NOHRS-3] Admin's explicit "worked zero hours this period" mark.
+            // Read-only here — set via DAL.setNoHoursAck, never by the draft sync.
+            no_hours_ack:    !!ts.no_hours_ack,
           };
         } else {
           // No timesheet yet — seed blank day rows so the UI has cells to type in.
@@ -13711,6 +14125,10 @@ const DAL = {
             time_entries:    periodDays.map(date => ({ date, clock_in: '', clock_out: '', notes: '' })),
             mileage_entries: [],
             reimbursements:  [],
+            // [NOHRS-3] No timesheet row means nothing has been acknowledged.
+            // Defaulting false here keeps the flag present on every entry, so
+            // readers never have to distinguish "false" from "undefined".
+            no_hours_ack:    false,
           };
         }
       }
