@@ -8308,17 +8308,28 @@ async function finalizePP(employeeId, btnEl) {
 
 // Pure date math: given the current period, compute the next one.
 // Assumes 14-day periods and pay_date = end + 1 day (matches this firm's convention).
+// [DST-1] Count CALENDAR days, not 24-hour blocks.
+//
+// The previous version added fixed millisecond amounts (24h × N) to local
+// midnight. That breaks when a period crosses the November daylight-saving
+// change: Sun Nov 1, 2026 was 25 hours long, so Oct 31 00:00 PDT + 13×24h
+// landed at Nov 12 23:00 PST and toIsoLocal() recorded the end date as
+// Nov 12 instead of Fri Nov 13 (and the pay date as Nov 13 instead of
+// Sat Nov 14). PP23 was saved that way, and every later period would have
+// inherited the one-day shift.
+//
+// Date.UTC has no daylight-saving, and passing day-of-month overflow
+// (e.g. Oct 30 + 14) lets JS roll the month/year correctly. The offsets are
+// unchanged from before — start = end + 1, end = end + 14, pay = end + 15 —
+// so periods that don't cross a clock change produce identical dates.
 function computeNextPeriod(curr) {
-  const oneDay = 24 * 60 * 60 * 1000;
-  const endDate = new Date(curr.end + "T00:00:00");
-  const nextStart = new Date(endDate.getTime() + oneDay);
-  const nextEnd = new Date(nextStart.getTime() + 13 * oneDay);
-  const nextPayDate = new Date(nextEnd.getTime() + oneDay);
+  const [y, m, d] = curr.end.split('-').map(Number);
+  const plusDays = n => new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
   return {
     pp: curr.pp + 1,
-    start: toIsoLocal(nextStart),
-    end: toIsoLocal(nextEnd),
-    pay_date: toIsoLocal(nextPayDate)
+    start: plusDays(1),
+    end: plusDays(14),
+    pay_date: plusDays(15)
   };
 }
 
@@ -15462,6 +15473,32 @@ async function hydrateAndRender() {
           if (ownEmpId) {
             const ownEntry = localEntries[ownEmpId];
             if (ownEntry && draftEntryHasData(ownEntry)) {
+              // [DST-1b] The saved browser copy may have been built from an
+              // older version of this period's date range — e.g. PP23 was
+              // first saved as Oct 31–Nov 12 before its end date was
+              // corrected to Nov 13. This copy replaces the cloud version of
+              // the user's own entry below, so any day missing from it would
+              // have no row to type into. Add a blank row for each day of
+              // the current period that the copy lacks. ADD-ONLY: existing
+              // rows (including anything typed) are never removed or changed.
+              try {
+                if (!Array.isArray(ownEntry.time_entries)) ownEntry.time_entries = [];
+                const have = new Set(ownEntry.time_entries.map(t => t && t.date));
+                const periodDays = generatePeriodDays(STATE.current_period.start, STATE.current_period.end);
+                let added = 0;
+                for (const date of periodDays) {
+                  if (!have.has(date)) {
+                    ownEntry.time_entries.push({ date, clock_in: '', clock_out: '', notes: '' });
+                    added++;
+                  }
+                }
+                if (added > 0) {
+                  ownEntry.time_entries.sort((a, b) => ((a && a.date) || '').localeCompare((b && b.date) || ''));
+                  console.log(`[DST-1b] added ${added} missing day row(s) to restored draft`);
+                }
+              } catch (padErr) {
+                console.warn('[DST-1b] day padding skipped:', padErr);
+              }
               meaningfulLocal[ownEmpId] = ownEntry;
             }
           }
