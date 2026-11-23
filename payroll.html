@@ -5024,7 +5024,7 @@ function renderPaystub(employeeId, pp) {
         ${p.mileage_dollars > 0 ? `
         <div class="earnings-row">
           <div>Mileage</div>
-          <div class="num-cell">${money(getMileageRateForYear(yearOfDate(p.end_date)))}</div>
+          <div class="num-cell">${money(getMileageRateForDate(p.end_date))}</div>
           <div class="num-cell">${p.mileage_miles.toFixed(2)} mi</div>
           <div class="num-cell">${money(p.mileage_dollars)}</div>
           <div class="num-cell">—</div>
@@ -6442,9 +6442,11 @@ function summarizeDraftEmployee(employee, entry) {
   const periodYear = (STATE.current_period && STATE.current_period.end)
     ? yearOfDate(STATE.current_period.end)
     : new Date().getFullYear();
-  const periodMileageRate = (typeof getMileageRateForYear === 'function')
-    ? getMileageRateForYear(periodYear)
-    : STATE.mileage_rate;
+  // [MR-2] By the period's end date, so a mid-year rate change applies
+  // from the right pay period.
+  const periodMileageRate = (STATE.current_period && STATE.current_period.end)
+    ? getMileageRateForDate(STATE.current_period.end)
+    : getMileageRateForYear(periodYear);
   const mileageDollars = totalMiles * periodMileageRate;
   let totalReimb = 0;
   entry.reimbursements.forEach(re => { totalReimb += (re.amount || 0); });
@@ -6958,7 +6960,7 @@ function renderRunPayrollEntry(empId) {
   }).join("");
 
   const mileageRows = entry.mileage_entries.map((me, i) => {
-    const dollars = (me.miles || 0) * STATE.mileage_rate;
+    const dollars = (me.miles || 0) * currentPeriodMileageRate();  // [MR-2]
     // [ML-1/ML-4] If miles are entered but the location/purpose is blank,
     // show a warning so Annie sees what's missing before finalize.
     const hasMiles = (Number(me.miles) || 0) > 0;
@@ -7071,7 +7073,7 @@ function renderRunPayrollEntry(empId) {
         </table>
         <button class="btn small" onclick="addDraftTime('${emp.id}')">+ Add day</button>
 
-        <div class="subpanel-label" style="margin-top:24px;">Mileage (${money(STATE.mileage_rate)}/mi)</div>
+        <div class="subpanel-label" style="margin-top:24px;">Mileage (${money(currentPeriodMileageRate())}/mi)</div>
         <div class="entry-help">Required: enter the location and business purpose for each trip (e.g. "Acme Corp — client meeting"). The IRS requires documented business purpose for every reimbursed mile.</div>
         <table class="entry-table">
           <thead>
@@ -7225,6 +7227,37 @@ function getMileageRateForYear(year) {
     return STATE.mileage_rates_by_year[year];
   }
   return STATE.mileage_rate || 0;
+}
+
+// [MR-2] Returns the mileage rate for a pay period, given that period's
+// END date ('YYYY-MM-DD'). Uses the latest mileage_rates row whose
+// effective_date is on or before that date. If no row qualifies (or rows
+// have no dates), falls back to the year-based lookup above, so behavior
+// with a single row per year is exactly what it was before MR-2.
+//
+// Example (2026 rows: 0.725 from 2026-01-01, 0.76 from 2026-11-14):
+//   getMileageRateForDate('2026-11-13') -> 0.725  (PP23)
+//   getMileageRateForDate('2026-11-27') -> 0.76   (PP24)
+function getMileageRateForDate(endDateIso) {
+  const rows = STATE.mileage_rate_rows;
+  const d = endDateIso ? String(endDateIso).slice(0, 10) : '';
+  if (d && Array.isArray(rows)) {
+    let best = null;
+    for (const r of rows) {
+      if (r && r.effective_date && r.effective_date <= d
+          && (!best || r.effective_date > best.effective_date)) {
+        best = r;
+      }
+    }
+    if (best && best.rate != null) return best.rate;
+  }
+  return getMileageRateForYear(d ? yearOfDate(d) : null);
+}
+
+// [MR-2] Rate for the pay period currently open in Run Payroll.
+function currentPeriodMileageRate() {
+  const end = STATE.current_period && STATE.current_period.end;
+  return end ? getMileageRateForDate(end) : (STATE.mileage_rate || 0);
 }
 
 // Compute YTD gross pay for an employee up to but NOT including a given PP.
@@ -7937,7 +7970,7 @@ function renderPreviewPaystub(employeeId) {
         ${period.mileage_dollars > 0 ? `
         <div class="earnings-row">
           <div>Mileage</div>
-          <div class="num-cell">${money(getMileageRateForYear(yearOfDate(period.end_date)))}</div>
+          <div class="num-cell">${money(getMileageRateForDate(period.end_date))}</div>
           <div class="num-cell">${period.mileage_miles.toFixed(2)} mi</div>
           <div class="num-cell">${money(period.mileage_dollars)}</div>
           <div class="num-cell">—</div>
@@ -9376,9 +9409,10 @@ function renderReceiptsMileageBody(isAdmin) {
     // row's pay period (by its end_date year), not the current year's
     // rate. Matters in 2027 when looking at 2026 mileage rows.
     const rowYear = pp.end_date ? yearOfDate(pp.end_date) : null;
-    const rowMileageRate = rowYear != null
-      ? getMileageRateForYear(rowYear)
-      : (STATE.mileage_rate || 0);
+    // [MR-2] By the row's pay-period end date (handles mid-year changes).
+    const rowMileageRate = pp.end_date
+      ? getMileageRateForDate(pp.end_date)
+      : (rowYear != null ? getMileageRateForYear(rowYear) : (STATE.mileage_rate || 0));
     const dollars = miles * rowMileageRate;
     totalMiles += miles;
     totalDollars += dollars;
@@ -10212,7 +10246,7 @@ function renderTaxRates() {
       </div>
       <div class="panel-body">
         <div class="ded-row head"><div>Item</div><div style="text-align:right">Rate</div><div style="text-align:right"></div></div>
-        <div class="ded-row"><div>IRS Mileage Reimbursement Rate</div><div style="text-align:right">$${STATE.mileage_rate.toFixed(3)}/mi</div><div style="text-align:right">—</div></div>
+        <div class="ded-row"><div>IRS Mileage Reimbursement Rate</div><div style="text-align:right">$${Number(currentPeriodMileageRate()).toFixed(3)}/mi</div><div style="text-align:right">—</div></div>
         <div class="ded-row"><div>Pay Frequency</div><div style="text-align:right">${esc(STATE.pay_frequency)}</div><div style="text-align:right">—</div></div>
       </div>
     </div>
@@ -10862,7 +10896,11 @@ async function submitEditPaystub() {
   // miles. getMileageRateForYear falls back to STATE.mileage_rate if no
   // year-specific row exists, so this is non-breaking for current data.
   const paystubYear = yearOfDate(p.end_date) || new Date().getFullYear();
-  const mileage_dollars = round2(milesNum * getMileageRateForYear(paystubYear));
+  // [MR-2] By this paystub's end date, so editing an older paystub keeps
+  // the rate that was in effect for its pay period.
+  const mileage_dollars = round2(milesNum * (p.end_date
+    ? getMileageRateForDate(p.end_date)
+    : getMileageRateForYear(paystubYear)));
   const reimbursement   = round2(reimbNum);
   const gross_plus_reimb = round2(newGross + mileage_dollars + reimbursement);
 
@@ -11554,7 +11592,7 @@ function downloadPaystubPdf(employeeId, pp) {
     if (p.mileage_dollars > 0) {
       // [Tier2 I-6] Show the rate that was in effect in the paystub's calendar
       // year, not the currently-loaded STATE.mileage_rate.
-      drawRow(['Mileage', fmtMoney(getMileageRateForYear(yearOfDate(p.end_date))), (p.mileage_miles || 0).toFixed(2) + ' mi', fmtMoney(p.mileage_dollars), '—']);
+      drawRow(['Mileage', fmtMoney(getMileageRateForDate(p.end_date)), (p.mileage_miles || 0).toFixed(2) + ' mi', fmtMoney(p.mileage_dollars), '—']);
     }
     if (p.reimbursement > 0) {
       drawRow(['Expense reimbursement', '—', '—', fmtMoney(p.reimbursement), '—']);
@@ -13193,7 +13231,7 @@ const DAL = {
   async getMileageRates() {
     const { data, error } = await supabaseClient
       .from('mileage_rates')
-      .select('year, rate')
+      .select('year, rate, effective_date')
       .order('year', { ascending: false });
 
     if (error) {
@@ -13843,10 +13881,26 @@ const DAL = {
     //   STATE.mileage_rates_by_year = { 2026: 0.725, 2027: 0.730, ... }
     // Used by getMileageRateForYear(year) when editing paystubs from a
     // specific year and (potentially) any future year-spanning lookup.
+    // [MR-2] mileageRateRows = every row with a start date, oldest first.
+    // getMileageRateForDate(endDate) picks the latest row whose
+    // effective_date is on or before a pay period's END date. This lets a
+    // rate change partway through a year (e.g. 2026: 0.725 from Jan 1,
+    // 0.76 from Nov 14 = PP24 onward) without re-pricing older paystubs.
+    // The by-year map is kept only as a fallback; when a year has more than
+    // one row it keeps that year's EARLIEST row, so the order rows come
+    // back from the database can never change it.
     const mileageRatesByYear = {};
-    for (const row of (mileageRates || [])) {
-      if (row && row.year != null && row.rate != null) {
+    const mileageRateRows = [];
+    const sortedMileageRows = (mileageRates || [])
+      .filter(row => row && row.year != null && row.rate != null)
+      .slice()
+      .sort((a, b) => String(a.effective_date || '').localeCompare(String(b.effective_date || '')));
+    for (const row of sortedMileageRows) {
+      if (mileageRatesByYear[row.year] == null) {
         mileageRatesByYear[row.year] = N(row.rate);
+      }
+      if (row.effective_date) {
+        mileageRateRows.push({ effective_date: String(row.effective_date).slice(0, 10), rate: N(row.rate) });
       }
     }
 
@@ -14167,6 +14221,7 @@ const DAL = {
       tax_rates_by_year:     taxRatesByYear,        // [YE-3] year-keyed map
       mileage_rate:          mileageRate,
       mileage_rates_by_year: mileageRatesByYear,   // [MR-1] year-keyed map
+      mileage_rate_rows:     mileageRateRows,      // [MR-2] date-keyed list
       pay_frequency:         payFrequency,
       current_period:        currentPeriod,
       employees:             stateEmployees,
